@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 //  تقويم غسيل الشهر (v11) — للعميل: أيام الغسيل بس ✅ وأيام لسه جاية 📅
 //  شبكة مدمجة فيها أيام الغسيل في الشهر الحالي بس (أيام غسيل العربية حسب
-//  باقتها — washDaysFor v17 — بالترتيب) — مش شبكة شهر كامل.
+//  باقتها — washDaysFor v18 — بالترتيب) — مش شبكة شهر كامل.
 //  بلا أي اسم عامل غسيل أو إشارة للأدمن.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from 'react'
@@ -25,15 +25,15 @@ export function WashCalendar({
   phase,
   washes,
   washesTotal,
-  chosenDay,
+  chosenDays,
 }: {
   car: Car
   phase: Phase
   washes: WashRequest[]
   /** عدد غسلات الباقة (12 أو 8 أو 4) — بيحدد كام يوم في الأسبوع */
   washesTotal: number
-  /** يوم الغسيل اللي اختاره العميل (باقة يوم واحد — v17) */
-  chosenDay?: number | null
+  /** أيام الغسيل اللي اختارها العميل (باقة أقل من كل أيام المرحلة — v18) */
+  chosenDays?: number[] | null
 }) {
   const [selectedDay, setSelectedDay] = useState<number | null>(null)
 
@@ -59,15 +59,15 @@ export function WashCalendar({
   }, [washes, year, month])
 
   // أيام الغسيل في الشهر الحالي = أيام غسيل العربية حسب باقتها
-  // (12 = كل أيام النموذج، 8 = أول وآخر يوم، 4 = اليوم اللي اختاره العميل)
+  // (12 = كل أيام المرحلة، 8 = يومين يختارهم العميل، 4 = يوم يختاره العميل)
   const washDays = useMemo(() => {
-    const weekDays = washDaysFor(phase.days, washesTotal, chosenDay)
+    const weekDays = washDaysFor(phase.days, washesTotal, chosenDays)
     const days: number[] = []
     for (let day = 1; day <= daysInMonth; day++) {
       if (weekDays.includes(new Date(year, month, day).getDay())) days.push(day)
     }
     return days
-  }, [phase, year, month, daysInMonth, washesTotal, chosenDay])
+  }, [phase, year, month, daysInMonth, washesTotal, chosenDays])
 
   // الغسلات المنجزة ضمن أيام الغسيل المعروضة بس
   const washedCount = washDays.filter((day) => washedByDay.has(day)).length

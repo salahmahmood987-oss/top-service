@@ -220,7 +220,11 @@ export function normalizeSubscription(id: string, d: Record<string, unknown>): S
     price: p.price ?? 0,
     washesTotal: p.washesTotal ?? 0,
     washesRemaining: p.washesRemaining ?? 0,
-    chosenDay: typeof p.chosenDay === 'number' ? p.chosenDay : null,
+    chosenDays: Array.isArray(p.chosenDays)
+      ? p.chosenDays.filter((d) => typeof d === 'number')
+      : typeof d.chosenDay === 'number'
+        ? [d.chosenDay]
+        : null,
     status: p.status ?? 'pending_payment',
     startDate: p.startDate ?? 0,
     endDate: p.endDate ?? monthEndTimestamp(),
