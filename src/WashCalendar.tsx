@@ -1,11 +1,13 @@
 // ---------------------------------------------------------------------------
 //  تقويم غسيل الشهر (v11) — للعميل: أيام الغسيل بس ✅ وأيام لسه جاية 📅
-//  شبكة مدمجة فيها أيام الغسيل في الشهر الحالي بس (أيام مرحلة العربية،
-//  بالترتيب) — مش شبكة شهر كامل. بلا أي اسم عامل غسيل أو إشارة للأدمن.
+//  شبكة مدمجة فيها أيام الغسيل في الشهر الحالي بس (أيام غسيل العربية حسب
+//  باقتها — washDaysFor v17 — بالترتيب) — مش شبكة شهر كامل.
+//  بلا أي اسم عامل غسيل أو إشارة للأدمن.
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from 'react'
 import type { Car, Phase, WashRequest } from './types'
 import { WEEKDAY_NAMES } from './types'
+import { washDaysFor } from './schedule'
 
 /** اسم اليوم المختصر: "الأحد" → "أحد" — للعرض في خلايا التقويم. */
 function shortWeekday(d: number): string {
@@ -23,12 +25,15 @@ export function WashCalendar({
   phase,
   washes,
   washesTotal,
+  chosenDay,
 }: {
   car: Car
   phase: Phase
   washes: WashRequest[]
-  /** عدد أيام الغسيل في الشهر حسب باقة العميل (12 أو 8 أو 4) */
+  /** عدد غسلات الباقة (12 أو 8 أو 4) — بيحدد كام يوم في الأسبوع */
   washesTotal: number
+  /** يوم الغسيل اللي اختاره العميل (باقة يوم واحد — v17) */
+  chosenDay?: number | null
 }) {
   const [selectedDay, setSelectedDay] = useState<number | null>(null)
 
@@ -53,15 +58,16 @@ export function WashCalendar({
     return map
   }, [washes, year, month])
 
-  // أيام الغسيل في الشهر الحالي = أيام مرحلة العربية، بالترتيب،
-  // مقصوصة على عدد غسلات الباقة (12 أو 8 أو 4 حسب اشتراك العميل)
+  // أيام الغسيل في الشهر الحالي = أيام غسيل العربية حسب باقتها
+  // (12 = كل أيام النموذج، 8 = أول وآخر يوم، 4 = اليوم اللي اختاره العميل)
   const washDays = useMemo(() => {
+    const weekDays = washDaysFor(phase.days, washesTotal, chosenDay)
     const days: number[] = []
     for (let day = 1; day <= daysInMonth; day++) {
-      if (phase.days.includes(new Date(year, month, day).getDay())) days.push(day)
+      if (weekDays.includes(new Date(year, month, day).getDay())) days.push(day)
     }
-    return washesTotal > 0 ? days.slice(0, washesTotal) : days
-  }, [phase, year, month, daysInMonth, washesTotal])
+    return days
+  }, [phase, year, month, daysInMonth, washesTotal, chosenDay])
 
   // الغسلات المنجزة ضمن أيام الغسيل المعروضة بس
   const washedCount = washDays.filter((day) => washedByDay.has(day)).length

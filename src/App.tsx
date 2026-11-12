@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v16)
+//  Top Service — المرحلة 1 (v17)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -84,7 +84,7 @@ import type {
   Washer,
   WashRequest,
 } from './types'
-import { phaseOf, todayCars } from './schedule'
+import { phaseOf, todayCars, washDaysFor } from './schedule'
 import type { TodayCar } from './schedule'
 import { WashCalendar } from './WashCalendar'
 import { reconcilePaymentReminders } from './reminders'
@@ -532,7 +532,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 16 — المرحلة 1</span>
+        <span className="badge">الإصدار 17 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -717,7 +717,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 16</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 17</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -762,10 +762,12 @@ function CustomerView({
   const [subCarId, setSubCarId] = useState<string | null>(null)
   const [subPkg, setSubPkg] = useState<number>(4)
   const [subMethod, setSubMethod] = useState<PaymentMethod>('cash')
-  // معالج الاشتراك الموجَّه (v15): كومباوند ← نموذج ← عدد الغسلات
+  // معالج الاشتراك الموجَّه (v15): كومباوند ← مرحلة ← عدد الغسلات
   const [wizStep, setWizStep] = useState<1 | 2 | 3>(1)
   const [wizCompoundId, setWizCompoundId] = useState<string | null>(null)
   const [wizPhaseId, setWizPhaseId] = useState<string | null>(null)
+  /** يوم الغسيل اللي اختاره العميل في المعالج (باقة يوم واحد — v17) */
+  const [wizDay, setWizDay] = useState<number | null>(null)
   const [wizBuilding, setWizBuilding] = useState('')
   const [wizApartment, setWizApartment] = useState('')
   const [washBusy, setWashBusy] = useState<string | null>(null)
@@ -920,6 +922,7 @@ function CustomerView({
     setWizStep(1)
     setWizCompoundId(customer?.compoundId ?? null)
     setWizPhaseId(null)
+    setWizDay(null)
     setWizBuilding(customer?.building ?? '')
     setWizApartment(customer?.apartment ?? '')
   }
@@ -930,6 +933,7 @@ function CustomerView({
     setWizStep(1)
     setWizCompoundId(null)
     setWizPhaseId(null)
+    setWizDay(null)
     setWizBuilding('')
     setWizApartment('')
   }
@@ -960,11 +964,11 @@ function CustomerView({
     }
     setBusy(true)
     // خطوات المعالج قبل الاشتراك نفسه: حدّث الكومباوند والعمارة والشقة
-    // في ملف العميل، واربط العربية بالنموذج اللي اختاره.
+    // في ملف العميل، واربط العربية بالمرحلة اللي اختارها.
     const wizCompound = compounds.find((c) => c.id === wizCompoundId)
     if (!wizCompound || !wizPhaseId) {
       setBusy(false)
-      onNotice('كمّل خطوات الاشتراك الأول — اختار الكومباوند والنموذج.')
+      onNotice('كمّل خطوات الاشتراك الأول — اختار الكومباوند والمرحلة.')
       return
     }
     const newBuilding = wizBuilding.trim()
@@ -995,7 +999,7 @@ function CustomerView({
     const okPhase = await saveDoc('cars', car.id, { phaseId: wizPhaseId })
     if (!okPhase) {
       setBusy(false)
-      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ النموذج — حاول تاني.')
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ المرحلة — حاول تاني.')
       return
     }
     const now = Date.now()
@@ -1003,6 +1007,13 @@ function CustomerView({
     // الشهر الأول بيتحسب من يوم الاشتراك (مثال: باقة 200 يوم 15 → 100)،
     // وسعر الباقة نفسه في الاشتراك مبيتغيرش — اللي بيتغيّر مبلغ الدفعة بس.
     const dueAmount = proratedFirstMonthAmount(pkg.price, now)
+    // يوم الغسيل (v17): باقة يوم واحد في الأسبوع والمرحلة فيها أكتر من
+    // يوم → اليوم اللي اختاره العميل في المعالج (أو أول يوم لو مختارش).
+    // غير كده null — والاشتراكات القديمة من غير الحقل ده بتاخد أول يوم.
+    const wizPhase = wizCompound.phases?.find((p) => p.id === wizPhaseId)
+    const wizDays = wizPhase ? washDaysFor(wizPhase.days, pkg.washes, wizDay) : []
+    const chosenDayToSave =
+      wizDays.length === 1 && wizPhase && wizPhase.days.length > 1 ? wizDays[0] : null
     const okSub = await saveDoc('subscriptions', subId, {
       id: subId,
       carId: car.id,
@@ -1014,6 +1025,7 @@ function CustomerView({
       price: pkg.price,
       washesTotal: pkg.washes,
       washesRemaining: pkg.washes,
+      chosenDay: chosenDayToSave,
       status: 'active',
       startDate: now,
       endDate: monthEndTimestamp(now),
@@ -1166,7 +1178,9 @@ function CustomerView({
                       📅 أيام الغسيل:{' '}
                       {phase ? (
                         <b>
-                          {phaseDaysLabel(phase.days)}
+                          {phaseDaysLabel(
+                            washDaysFor(phase.days, active.washesTotal, active.chosenDay),
+                          )}
                           {phase.name ? ` (${phase.name})` : ''}
                         </b>
                       ) : (
@@ -1184,6 +1198,7 @@ function CustomerView({
                         car={car}
                         phase={phase}
                         washesTotal={active.washesTotal}
+                        chosenDay={active.chosenDay}
                         washes={history.filter(
                           (w) => w.carId === car.id && w.status === 'done',
                         )}
@@ -1306,6 +1321,22 @@ function CustomerView({
             const wizCompound = compounds.find((c) => c.id === wizCompoundId)
             const wizPhases = wizCompound?.phases ?? []
             const wizPhase = wizPhases.find((p) => p.id === wizPhaseId)
+            // أيام غسيل العربية حسب الباقة (v17) — واليوم اللي يختاره العميل
+            // لو الباقة يوم واحد في الأسبوع والمرحلة فيها أكتر من يوم.
+            const wizPkg = packageById(subPkg, packages)
+            const wizWashDays = wizPhase
+              ? washDaysFor(wizPhase.days, wizPkg?.washes ?? 0, wizDay)
+              : []
+            const wizNeedsDay =
+              !!wizPhase &&
+              packages.length > 0 &&
+              wizPhase.days.length > 1 &&
+              wizWashDays.length === 1
+            const wizSortedDays = wizPhase
+              ? [...wizPhase.days].sort(
+                  (a, b) => [6, 0, 1, 2, 3, 4, 5].indexOf(a) - [6, 0, 1, 2, 3, 4, 5].indexOf(b),
+                )
+              : []
             return (
               <div className="ride" key={car.id}>
                 <b>
@@ -1352,6 +1383,7 @@ function CustomerView({
                             onClick={() => {
                               setWizCompoundId(c.id)
                               setWizPhaseId(null)
+                              setWizDay(null)
                             }}
                           >
                             <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -1391,7 +1423,7 @@ function CustomerView({
                     )}
                     {wizStep === 2 && (
                       <>
-                        <label>اختار النموذج</label>
+                        <label>اختار المرحلة</label>
                         {wizPhases.length === 0 ? (
                           <p className="muted">
                             لسه مفيش نماذج للكومباوند ده — كلم الشركة على {COMPANY_PHONE}.
@@ -1401,10 +1433,13 @@ function CustomerView({
                             <div
                               key={p.id}
                               className={`pkg${wizPhaseId === p.id ? ' selected' : ''}`}
-                              onClick={() => setWizPhaseId(p.id)}
+                              onClick={() => {
+                                setWizPhaseId(p.id)
+                                setWizDay(null)
+                              }}
                             >
                               <div className="row" style={{ justifyContent: 'space-between' }}>
-                                <span className="pkg-washes">النموذج: {p.name}</span>
+                                <span className="pkg-washes">المرحلة: {p.name}</span>
                                 {wizPhaseId === p.id && <span>✅</span>}
                               </div>
                               <div className="muted">{phaseDaysLabel(p.days)}</div>
@@ -1428,10 +1463,16 @@ function CustomerView({
                     {wizStep === 3 && (
                       <>
                         <p className="muted">
-                          الكومباوند: <b>{wizCompound?.name}</b> — النموذج:{' '}
+                          الكومباوند: <b>{wizCompound?.name}</b> — المرحلة:{' '}
                           <b>
                             {wizPhase?.name} ({phaseDaysLabel(wizPhase?.days ?? [])})
                           </b>
+                          {wizNeedsDay && (
+                            <>
+                              {' '}
+                              — يوم الغسيل: <b>{WEEKDAY_NAMES[wizWashDays[0]]}</b>
+                            </>
+                          )}
                         </p>
                         <label>اختار عدد الغسلات</label>
                         {packages.length === 0 && (
@@ -1454,6 +1495,29 @@ function CustomerView({
                             </div>
                           </div>
                         ))}
+                        {wizNeedsDay && (
+                          <>
+                            <label>اختار يوم الغسيل</label>
+                            <div className="row" style={{ flexWrap: 'wrap' }}>
+                              {wizSortedDays.map((d) => (
+                                <button
+                                  key={d}
+                                  type="button"
+                                  className={`btn small${
+                                    (wizDay ?? wizSortedDays[0]) === d ? ' active' : ''
+                                  }`}
+                                  onClick={() => setWizDay(d)}
+                                >
+                                  {WEEKDAY_NAMES[d]}
+                                </button>
+                              ))}
+                            </div>
+                            <p className="muted">
+                              باقة {wizPkg?.washes} غسلات يعني يوم غسيل واحد في الأسبوع —
+                              اختار اليوم المناسب ليك.
+                            </p>
+                          </>
+                        )}
                         <label>طريقة الدفع (التحصيل من يوم 25)</label>
                         <select
                           value={subMethod}
@@ -1845,7 +1909,9 @@ function WasherView({
                       </div>
                       <div className="muted">
                         شقة {e.customer.apartment} — مرحلة {e.phase.name}:{' '}
-                        {phaseDaysLabel(e.phase.days)}
+                        {phaseDaysLabel(
+                          washDaysFor(e.phase.days, e.sub.washesTotal, e.sub.chosenDay),
+                        )}
                       </div>
                       <div className="muted" style={{ marginTop: 8 }}>
                         📷 صورة الغسلة (اختياري) — إثبات للعميل
@@ -1936,10 +2002,11 @@ function PhaseEditor({
 
   /** نموذج جاهز بضغطة واحدة — الأيام بأرقام getDay(): 0=الأحد … 6=السبت.
    *  حد/تلات/خميس = [0, 2, 4]، سبت/اتنين/أربع = [6, 1, 3].
-   *  لو اسم المرحلة فاضي بيتملّى تلقائياً (نموذج A / نموذج B). */
-  function applyPreset(presetDays: number[], defaultName: string) {
+   *  الزرار بيظبط الأيام بس — الاسم بيفضل اللي الأدمن كاتبه (أو الأيام
+   *  لو فاضي)، لأن المرحلة مش لازم تبقى "نموذج": في كومباوندات بتتقسّم
+   *  بأرقام العماير (مثال: عمارات 1-50 و51-100). */
+  function applyPreset(presetDays: number[]) {
     setDays([...presetDays].sort((a, b) => a - b))
-    if (!name.trim()) setName(defaultName)
   }
 
   function addPhase() {
@@ -1982,10 +2049,10 @@ function PhaseEditor({
       />
       <label>أيام المرحلة</label>
       <div className="row" style={{ flexWrap: 'wrap' }}>
-        <button type="button" className="btn small" onClick={() => applyPreset([0, 2, 4], 'نموذج A')}>
+        <button type="button" className="btn small" onClick={() => applyPreset([0, 2, 4])}>
           حد / تلات / خميس
         </button>
-        <button type="button" className="btn small" onClick={() => applyPreset([6, 1, 3], 'نموذج B')}>
+        <button type="button" className="btn small" onClick={() => applyPreset([6, 1, 3])}>
           سبت / اتنين / أربع
         </button>
       </div>
@@ -2999,7 +3066,8 @@ function AdminView({
                 {e.customer.apartment}
               </div>
               <div className="muted">
-                مرحلة {e.phase.name}: {phaseDaysLabel(e.phase.days)}
+                مرحلة {e.phase.name}:{' '}
+                {phaseDaysLabel(washDaysFor(e.phase.days, e.sub.washesTotal, e.sub.chosenDay))}
               </div>
               <div className="muted" style={{ marginTop: 8 }}>
                 📷 صورة الغسلة (اختياري) — إثبات للعميل

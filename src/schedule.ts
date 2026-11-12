@@ -4,9 +4,41 @@
 //  وعندها اشتراك شهري نشط، ولسه متغسلتش النهاردة.
 //  (مفيش عدّاد غسلات — الرصيد شهري: العربية بتتغسل في أيام مرحلتها
 //  طول الشهر، والاشتراك بينتهي آخر الشهر.)
+//  أيام الغسيل (v17): مش كل أيام النموذج — حسب الباقة: 12 غسلة = كل
+//  الأيام، 8 = أول وآخر يوم (حد وخميس / سبت وأربع)، 4 = يوم واحد
+//  يختاره العميل من أيام النموذج.
 // ---------------------------------------------------------------------------
 import { isSubscriptionActive } from './types'
 import type { Car, Compound, Customer, Phase, Subscription, WashRequest } from './types'
+
+/** ترتيب الأسبوع عندنا: بيبدأ من السبت. */
+const WEEK_ORDER = [6, 0, 1, 2, 3, 4, 5]
+
+/**
+ * أيام غسيل العربية من أيام نموذجها، حسب باقة اشتراكها (v17):
+ * - daysPerWeek = clamp(round(washesTotal / 4), 1, عدد أيام المرحلة)
+ *   (4 غسلات → يوم واحد، 8 → يومين، 12 → 3 أيام)
+ * - كل الأيام → كل أيام النموذج بالترتيب.
+ * - يومين → أول وآخر يوم في النموذج (حد وخميس / سبت وأربع).
+ * - يوم واحد → اليوم اللي اختاره العميل لو من أيام النموذج، وإلا أول يوم.
+ * مثال: نموذج [0,2,4] + 8 → [0,4] (حد وخميس)، + 4 → اليوم المختار أو [0].
+ * نموذج [6,1,3] + 8 → [6,3] (سبت وأربع)، + 4 → اليوم المختار أو [6].
+ */
+export function washDaysFor(
+  phaseDays: number[],
+  washesTotal: number,
+  chosenDay?: number | null,
+): number[] {
+  const sorted = [...phaseDays].sort((a, b) => WEEK_ORDER.indexOf(a) - WEEK_ORDER.indexOf(b))
+  if (sorted.length === 0) return []
+  const daysPerWeek = Math.min(Math.max(Math.round(washesTotal / 4), 1), sorted.length)
+  if (daysPerWeek >= sorted.length) return sorted
+  if (daysPerWeek === 1) {
+    return [chosenDay != null && sorted.includes(chosenDay) ? chosenDay : sorted[0]]
+  }
+  if (daysPerWeek === 2) return [sorted[0], sorted[sorted.length - 1]]
+  return sorted.slice(0, daysPerWeek)
+}
 
 /** عربية مطلوب غسيلها النهاردة — مع كل بياناتها للعرض والتسجيل. */
 export interface TodayCar {
@@ -30,8 +62,8 @@ export function phaseOf(
 }
 
 /**
- * عربيات النهاردة: عربية مرحلتها تشمل يوم النهاردة، وعندها اشتراك شهري
- * نشط، ولسه متغسلتش النهاردة.
+ * عربيات النهاردة: يوم النهاردة من أيام غسيل العربية حسب باقتها
+ * (washDaysFor — v17)، وعندها اشتراك شهري نشط، ولسه متغسلتش النهاردة.
  * compoundIds: كومباوندات عامل الغسيل — فاضية/غير موجودة = كل الكومباوندات.
  * الترتيب: اسم الكومباوند، ثم العمارة، ثم اللوحة.
  */
@@ -59,9 +91,10 @@ export function todayCars(
       ? compound.phases?.find((p) => p.id === car.phaseId)
       : undefined
     if (!phase) continue
-    if (!phase.days.includes(today)) continue
     const sub = subs.find((s) => s.carId === car.id && isSubscriptionActive(s))
     if (!sub) continue
+    // أيام الغسيل حسب الباقة (v17) — مش كل أيام النموذج.
+    if (!washDaysFor(phase.days, sub.washesTotal, sub.chosenDay).includes(today)) continue
     out.push({ car, customer, sub, phase, compound })
   }
   out.sort((a, b) => {

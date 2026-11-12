@@ -84,6 +84,9 @@ export interface Subscription {
   /** حقل قديم للتوافق مع مستندات سابقة — الرصيد شهري مش عدد غسلات،
    *  فمفيش حاجة بتقرا الحقل ده كبوابة أو بتعرضه كرصيد. */
   washesRemaining: number
+  /** يوم الغسيل اللي اختاره العميل (باقة يوم واحد في الأسبوع — v17):
+   *  رقم getDay من أيام النموذج، أو null لو الباقة أكتر من يوم. */
+  chosenDay?: number | null
   status: SubscriptionStatus
   /** بداية الاشتراك (وقت موافقة الأدمن) */
   startDate: number
