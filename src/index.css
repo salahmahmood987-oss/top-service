@@ -150,4 +150,20 @@ label { font-weight: 700; font-size: 14px; }
 /* مجموعة عامل الغسيل: عنوان الكومباوند/العمارة */
 .group-head { background: linear-gradient(180deg, #f5eef2, #efe3ea); border: 1px solid #e3cdd8; border-radius: 14px; padding: 10px 14px; margin: 16px 0 8px; font-weight: 800; color: var(--plum); box-shadow: var(--shadow-sm); }
 
+/* تقويم غسيل الشهر — للعميل: شبكة أيام الغسيل بس */
+.cal { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.cal h4 { margin: 0 0 10px; font-size: 16px; font-weight: 800; }
+.cal-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.cal-day { position: relative; border-radius: 14px; border: 1px solid var(--line); background: #fff; color: var(--ink); font-family: inherit; padding: 10px 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; box-shadow: var(--shadow-sm); cursor: default; }
+.cal-dow { font-size: 12px; font-weight: 700; color: var(--muted); }
+.cal-num { font-size: 18px; font-weight: 800; line-height: 1; }
+.cal-day.washed { background: linear-gradient(180deg, #f0fdf4, #dcfce7); border-color: #86efac; color: #166534; cursor: pointer; }
+.cal-day.washed .cal-dow { color: #166534; }
+.cal-day.upcoming { background: #fff8f4; border: 2px solid var(--orange); color: var(--orange-deep); }
+.cal-day.today { box-shadow: 0 0 0 2px var(--plum); }
+.cal-day.selected { box-shadow: 0 0 0 2px var(--green-deep); }
+.cal-mark { font-size: 12px; line-height: 1; }
+.cal-photo { margin-top: 10px; }
+.cal-photo p { margin: 4px 0; }
+
 @media (max-width: 560px) { .tab { font-size: 13px; padding: 10px 4px; gap: 4px; } .tab .ic { width: 17px; height: 17px; } }
