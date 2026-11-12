@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v12)
+//  Top Service — المرحلة 1 (v13)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -84,6 +84,7 @@ import type {
 import { phaseOf, todayCars } from './schedule'
 import type { TodayCar } from './schedule'
 import { WashCalendar } from './WashCalendar'
+import { reconcilePaymentReminders } from './reminders'
 import {
   BuildingIcon,
   CalendarIcon,
@@ -514,7 +515,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 12 — المرحلة 1</span>
+        <span className="badge">الإصدار 13 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -696,7 +697,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 12</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 13</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -800,6 +801,13 @@ function CustomerView({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.phone])
+
+  // تنبيهات الدفع على الموبايل (إشعارات محلية — للعميل بس): كل ما المدفوعات
+  // تتغير، المستحق بيتجدول واللي اتدفع بتتلغي تذكيراته. صامت — من غير أي واجهة.
+  useEffect(() => {
+    void reconcilePaymentReminders(payments)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payments])
 
   function activeSubFor(carId: string): Subscription | undefined {
     return subs.find((s) => s.carId === carId && isSubscriptionActive(s))
@@ -1028,11 +1036,9 @@ function CustomerView({
             .filter((x) => x.status !== 'not-yet')
             .map(({ p, status }) => (
               <div key={p.id} className={`remind${status === 'overdue' ? ' overdue' : ''}`}>
-                {status === 'open' &&
-                  `⚠️ لسه عليك ${p.amount} جنيه — التحصيل من يوم 25 لآخر الشهر + 5 أيام سماح (لحد يوم 5 الشهر الجاي).`}
-                {status === 'grace' &&
-                  `⚠️ لسه عليك ${p.amount} جنيه — انت في فترة السماح، لحد يوم 5 الشهر الجاي.`}
-                {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر — عدى فترة السماح.`}
+                {status === 'open' && `⚠️ لسه عليك ${p.amount} جنيه — ادفع الآن.`}
+                {status === 'grace' && `⚠️ لسه عليك ${p.amount} جنيه — ادفع الآن.`}
+                {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر — ادفع الآن.`}
               </div>
             ))}
           {cars.map((car) => {
