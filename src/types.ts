@@ -192,6 +192,38 @@ export function isCollectionOpen(now = Date.now()): boolean {
   return new Date(now).getDate() >= 25
 }
 
+/** حالة التحصيل لدفعة مستحقة — حسب شهر إنشائها والنهاردة:
+ *  'not-yet' لسه قبل يوم 25 من نفس الشهر، 'open' من يوم 25 لآخر الشهر،
+ *  'grace' أول 5 أيام من الشهر الجاي (فترة السماح)، 'overdue' بعد كده. */
+export type CollectionStatus = 'not-yet' | 'open' | 'grace' | 'overdue'
+
+export function paymentCollectionStatus(
+  paymentCreatedAt: number,
+  now = Date.now(),
+): CollectionStatus {
+  const created = new Date(paymentCreatedAt)
+  const n = new Date(now)
+  const sameMonth =
+    created.getFullYear() === n.getFullYear() && created.getMonth() === n.getMonth()
+  if (sameMonth) return n.getDate() >= 25 ? 'open' : 'not-yet'
+  const isNextMonth =
+    (n.getFullYear() === created.getFullYear() && n.getMonth() === created.getMonth() + 1) ||
+    (created.getMonth() === 11 && n.getMonth() === 0 && n.getFullYear() === created.getFullYear() + 1)
+  if (isNextMonth) return n.getDate() <= 5 ? 'grace' : 'overdue'
+  return 'overdue'
+}
+
+/** حساب الشهر الأول من يوم الاشتراك: لو اشترك يوم 1 → السعر كامل،
+ *  غير كده السعر × (أيام الشهر المتبقية بعد يوم الاشتراك ÷ أيام الشهر).
+ *  مثال: باقة 200 جنيه، اشترك يوم 15 نوفمبر (30 يوم) → 200×15÷30 = 100. */
+export function proratedFirstMonthAmount(price: number, startDateTs: number): number {
+  const d = new Date(startDateTs)
+  const startDay = d.getDate()
+  if (startDay <= 1) return price
+  const daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+  return Math.round((price * (daysInMonth - startDay)) / daysInMonth)
+}
+
 /** آخر يوم في الشهر الحالي (23:59:59) — نهاية الاشتراك الشهري. */
 export function monthEndTimestamp(from: number = Date.now()): number {
   const d = new Date(from)

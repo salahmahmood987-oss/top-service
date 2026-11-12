@@ -77,6 +77,11 @@ label { font-weight: 700; font-size: 14px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .muted { color: var(--muted); font-size: 13px; }
 .warn { background: linear-gradient(135deg, #fef2f2, #fee2e2); border: 1px solid #fca5a5; color: #991b1b; padding: 12px 14px; border-radius: 14px; font-weight: 600; }
+/* تذكير بالدفع — كارت بارز (برتقالي)، والمتأخر أحمر */
+.remind { background: linear-gradient(135deg, #fff8f4, #fdeee7); border: 2px solid var(--orange); color: #8a3d24; padding: 14px; border-radius: 16px; margin-bottom: 12px; font-weight: 700; line-height: 1.6; box-shadow: var(--shadow-sm); }
+.remind.overdue { background: linear-gradient(135deg, #fef2f2, #fee2e2); border-color: #fca5a5; color: #991b1b; }
+/* عدّاد صغير على زرار تبويب (مثال: عدد المستحقين في تبويب التحصيل) */
+.tab-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px; background: #dc2626; color: #fff; font-size: 12px; font-weight: 800; }
 .notice { background: linear-gradient(135deg, #f0fdf4, #dcfce7); border: 1px solid #86efac; color: #166534; padding: 12px 14px; border-radius: 14px; margin-bottom: 12px; font-weight: 600; box-shadow: var(--shadow-sm); }
 .box { background: linear-gradient(180deg, #fffbeb, #fef3c7); border: 1px solid #fcd34d; border-radius: 18px; padding: 16px; margin-bottom: 12px; box-shadow: var(--shadow-3d-sm); }
 .saved-bar { background: linear-gradient(180deg, #f0fdf4, #dcfce7); border: 1px solid #86efac; border-radius: 16px; padding: 12px 14px; margin-bottom: 12px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; box-shadow: var(--shadow-3d-sm); }

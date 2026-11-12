@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v11)
+//  Top Service — المرحلة 1 (v12)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -64,11 +64,14 @@ import {
   isSubscriptionActive,
   monthEndTimestamp,
   packageById,
+  paymentCollectionStatus,
   phaseDaysLabel,
+  proratedFirstMonthAmount,
   todayWeekday,
 } from './types'
 import type {
   Car,
+  CollectionStatus,
   Compound,
   Customer,
   Payment,
@@ -511,7 +514,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 11 — المرحلة 1</span>
+        <span className="badge">الإصدار 12 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -693,7 +696,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 11</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 12</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -808,6 +811,29 @@ function CustomerView({
   function paidPaymentFor(subId: string): Payment | undefined {
     return payments.find((p) => p.subscriptionId === subId && p.status === 'approved')
   }
+  /** سطر "المستحق" — حسب حالة التحصيل (نافذة / سماح / متأخر) + ملاحظة الشهر الأول. */
+  function dueLine(pay: Payment, sub: Subscription) {
+    const status: CollectionStatus = paymentCollectionStatus(pay.createdAt)
+    const startDay = new Date(sub.startDate).getDate()
+    const windowText =
+      status === 'grace'
+        ? 'فترة السماح — لحد يوم 5'
+        : status === 'overdue'
+          ? 'متأخر — عدى فترة السماح'
+          : 'التحصيل من يوم 25 لآخر الشهر + 5 أيام سماح (لحد يوم 5 الشهر الجاي)'
+    return (
+      <div
+        className="muted"
+        style={{
+          marginTop: 6,
+          ...(status === 'overdue' ? { color: '#991b1b', fontWeight: 700 } : {}),
+        }}
+      >
+        المستحق: {pay.amount} جنيه — {windowText}
+        {startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}
+      </div>
+    )
+  }
 
   async function addCar(e: FormEvent) {
     e.preventDefault()
@@ -871,6 +897,10 @@ function CustomerView({
     }
     setBusy(true)
     const now = Date.now()
+    const startDay = new Date(now).getDate()
+    // الشهر الأول بيتحسب من يوم الاشتراك (مثال: باقة 200 يوم 15 → 100)،
+    // وسعر الباقة نفسه في الاشتراك مبيتغيرش — اللي بيتغيّر مبلغ الدفعة بس.
+    const dueAmount = proratedFirstMonthAmount(pkg.price, now)
     const okSub = await saveDoc('subscriptions', subId, {
       id: subId,
       carId: car.id,
@@ -895,7 +925,7 @@ function CustomerView({
           customerPhone: session.phone,
           customerName: session.name,
           carPlate: car.plate,
-          amount: pkg.price,
+          amount: dueAmount,
           method: subMethod,
           status: 'due',
           receiptNo: null,
@@ -911,7 +941,7 @@ function CustomerView({
     setSubCarId(null)
     await loadAll()
     onNotice(
-      `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${pkg.price} جنيه، والتحصيل من يوم 25.`,
+      `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${dueAmount} جنيه${startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}، والتحصيل من يوم 25 لآخر الشهر + 5 أيام سماح.`,
     )
   }
 
@@ -991,6 +1021,20 @@ function CustomerView({
               </button>
             </div>
           )}
+          {/* تذكير بالدفع — بيظهر من يوم 25 بس، للدفعات اللي لسه متدفعتش */}
+          {payments
+            .filter((p) => p.status === 'due')
+            .map((p) => ({ p, status: paymentCollectionStatus(p.createdAt) }))
+            .filter((x) => x.status !== 'not-yet')
+            .map(({ p, status }) => (
+              <div key={p.id} className={`remind${status === 'overdue' ? ' overdue' : ''}`}>
+                {status === 'open' &&
+                  `⚠️ لسه عليك ${p.amount} جنيه — التحصيل من يوم 25 لآخر الشهر + 5 أيام سماح (لحد يوم 5 الشهر الجاي).`}
+                {status === 'grace' &&
+                  `⚠️ لسه عليك ${p.amount} جنيه — انت في فترة السماح، لحد يوم 5 الشهر الجاي.`}
+                {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر — عدى فترة السماح.`}
+              </div>
+            ))}
           {cars.map((car) => {
             const active = activeSubFor(car.id)
             const duePay = active ? duePaymentFor(active.id) : undefined
@@ -1029,11 +1073,7 @@ function CustomerView({
                         'لسه متحددتش أيام الغسيل للعربية دي.'
                       )}
                     </div>
-                    {duePay && (
-                      <div className="muted" style={{ marginTop: 6 }}>
-                        المستحق: {duePay.amount} جنيه — التحصيل من يوم 25
-                      </div>
-                    )}
+                    {duePay && dueLine(duePay, active)}
                     {paidPay && (
                       <div className="muted" style={{ marginTop: 6 }}>
                         تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}
@@ -1174,11 +1214,7 @@ function CustomerView({
                     نشط حتى {fmtDate(active.endDate)}
                   </p>
                 )}
-                {active && duePay && (
-                  <p className="muted">
-                    المستحق: {duePay.amount} جنيه — التحصيل من يوم 25
-                  </p>
-                )}
+                {active && duePay && dueLine(duePay, active)}
                 {active && paidPay && (
                   <p className="muted">تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}</p>
                 )}
@@ -2249,6 +2285,13 @@ function AdminView({
   const pendingPayments = payments.filter((p) => p.status === 'pending')
   const receipts = payments.filter((p) => p.status === 'approved' || p.status === 'rejected')
   const totalDue = duePayments.reduce((sum, p) => sum + p.amount, 0)
+  // الدفعات المستحقة اللي نافذة التحصيل مفتوحة ليها (من يوم 25 / سماح / متأخر)
+  const activeDue = duePayments
+    .map((p) => ({ p, status: paymentCollectionStatus(p.createdAt) }))
+    .filter((x) => x.status !== 'not-yet')
+  const activeDueCount = activeDue.length
+  const activeDueTotal = activeDue.reduce((sum, x) => sum + x.p.amount, 0)
+  const graceDueCount = activeDue.filter((x) => x.status === 'grace').length
 
   return (
     <>
@@ -2267,6 +2310,7 @@ function AdminView({
           onClick={() => setTab('payments')}
         >
           <ReceiptIcon /> التحصيل
+          {activeDueCount > 0 && <span className="tab-badge">{activeDueCount}</span>}
         </button>
         <button className={`tab${tab === 'today' ? ' active' : ''}`} onClick={() => setTab('today')}>
           <DropIcon /> غسلات اليوم
@@ -2371,7 +2415,10 @@ function AdminView({
                         </b>
                       ) : duePay ? (
                         <b style={{ color: '#8a3d24' }}>
-                          مستحق: {duePay.amount} جنيه — التحصيل من يوم 25
+                          مستحق: {duePay.amount} جنيه — التحصيل من يوم 25 لآخر الشهر + 5 أيام سماح
+                          {latestSub && new Date(latestSub.startDate).getDate() > 1
+                            ? ` (حساب الشهر الأول من يوم ${new Date(latestSub.startDate).getDate()})`
+                            : ''}
                         </b>
                       ) : (
                         <span>بدون اشتراك نشط</span>
@@ -2467,33 +2514,48 @@ function AdminView({
         <div className="card">
           <h2>التحصيل ({duePayments.length})</h2>
           <p className="muted">
-            التحصيل يبدأ من يوم 25 من الشهر{isCollectionOpen() ? ' — نافذة التحصيل مفتوحة دلوقتي ✅' : ''} — إجمالي
-            المستحق: {totalDue} جنيه.
+            التحصيل يبدأ من يوم 25 من الشهر لآخر الشهر + 5 أيام سماح (لحد يوم 5 الشهر الجاي)
+            {isCollectionOpen()
+              ? ' — نافذة التحصيل مفتوحة دلوقتي ✅'
+              : graceDueCount > 0
+                ? ' — فترة السماح مفتوحة دلوقتي ✅'
+                : ''}{' '}
+            — إجمالي المستحق: {totalDue} جنيه.
           </p>
+          {activeDueCount > 0 && (
+            <p className="muted">
+              لسه ما دفعوش: {activeDueCount} عميل — إجمالي {activeDueTotal} جنيه
+            </p>
+          )}
           {duePayments.length === 0 && <p className="muted">مفيش مستحقات للتحصيل دلوقتي.</p>}
-          {duePayments.map((p) => (
-            <div className="ride" key={p.id}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <b>
-                  {p.customerName} — {p.amount} جنيه
-                </b>
-                <span className="order-badge">مستحق</span>
+          {duePayments.map((p) => {
+            const st = paymentCollectionStatus(p.createdAt)
+            return (
+              <div className="ride" key={p.id}>
+                <div className="row" style={{ justifyContent: 'space-between' }}>
+                  <b>
+                    {p.customerName} — {p.amount} جنيه
+                  </b>
+                  <span className={`order-badge${st === 'overdue' ? ' red' : ''}`}>
+                    {st === 'grace' ? 'في فترة السماح' : st === 'overdue' ? 'متأخر' : 'مستحق — التحصيل من يوم 25'}
+                  </span>
+                </div>
+                <div className="muted">
+                  {p.carPlate} — {p.method === 'cash' ? 'نقدي' : p.method === 'visa' ? 'فيزا' : 'محفظة'} —{' '}
+                  {fmtDateTime(p.createdAt)}
+                </div>
+                <div className="row">
+                  <button
+                    className="btn small active"
+                    onClick={() => void collectPayment(p)}
+                    disabled={payBusy === p.id}
+                  >
+                    <CheckIcon /> {payBusy === p.id ? 'بيحفظ…' : 'تأكيد التحصيل'}
+                  </button>
+                </div>
               </div>
-              <div className="muted">
-                {p.carPlate} — {p.method === 'cash' ? 'نقدي' : p.method === 'visa' ? 'فيزا' : 'محفظة'} —{' '}
-                {fmtDateTime(p.createdAt)}
-              </div>
-              <div className="row">
-                <button
-                  className="btn small active"
-                  onClick={() => void collectPayment(p)}
-                  disabled={payBusy === p.id}
-                >
-                  <CheckIcon /> {payBusy === p.id ? 'بيحفظ…' : 'تأكيد التحصيل'}
-                </button>
-              </div>
-            </div>
-          ))}
+            )
+          })}
           {pendingPayments.length > 0 && (
             <>
               <h3>مدفوعات قديمة بانتظار التأكيد ({pendingPayments.length})</h3>
