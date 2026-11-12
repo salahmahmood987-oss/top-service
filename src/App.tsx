@@ -1,8 +1,11 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v5)
+//  Top Service — المرحلة 1 (v6)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
-//  بيانات العميل والعربية + باقات + طلب غسلة + عدّاد رصيد + لوحة أدمن + تأكيد دفع يدوي.
+//  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
+//  الغسيل بجدول مراحل ثابت: الأدمن بيحدد مراحل كل كومباوند (مجموعة أيام
+//  أسبوع) ويربط كل عربية بمرحلة — العميل مبيطلبش غسلة، وعامل الغسيل
+//  بيشوف عربيات النهاردة بس ويعلّم "تم الغسيل" (مع صورة اختيارية كإثبات).
 //  لا توجد بيانات وهمية — كل رقم من Firestore (أو حالة "غير مربوط" صادقة).
 //  الأخطاء والرسائل في مودال وسط الشاشة، وليست شريطاً علوياً.
 // ---------------------------------------------------------------------------
@@ -15,7 +18,6 @@ import logoTransparent from './assets/logo-top-services-transparent.png'
 import { isFirebaseConfigured } from './firebaseConfig'
 import {
   approvePayment,
-  completeWash,
   confirmCollection,
   deleteDocById,
   getLastFirestoreError,
@@ -28,17 +30,18 @@ import {
   loadCollection,
   loadCompounds,
   loadCustomer,
-  loadOpenWashRequests,
   loadPaymentsOfCustomer,
   loadSubscriptionsOfCustomer,
   loadWashHistoryOfCustomer,
   loadWasher,
   loadWasherDoneWashes,
   newDocId,
+  normalizeCar,
   normalizeCustomer,
   normalizePayment,
   normalizeSubscription,
   normalizeWash,
+  recordWashDone,
   rejectPayment,
   saveDoc,
   setFirestoreErrorHandler,
@@ -51,12 +54,15 @@ import { preparePhotoForFirestore } from './imageUpload'
 import {
   ADMIN_PHONE,
   PACKAGES,
+  WEEKDAY_NAMES,
   fmtDate,
   fmtDateTime,
   isCollectionOpen,
   isSubscriptionActive,
   monthEndTimestamp,
   packageById,
+  phaseDaysLabel,
+  todayWeekday,
 } from './types'
 import type {
   Car,
@@ -64,10 +70,13 @@ import type {
   Customer,
   Payment,
   PaymentMethod,
+  Phase,
   Subscription,
   Washer,
   WashRequest,
 } from './types'
+import { phaseOf, todayCars } from './schedule'
+import type { TodayCar } from './schedule'
 import {
   BuildingIcon,
   CalendarIcon,
@@ -479,7 +488,7 @@ export default function App() {
           <span className="brand">Top Service</span>
         </h1>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 5 — المرحلة 1</span>
+        <span className="badge">الإصدار 6 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -493,7 +502,6 @@ export default function App() {
         <div className="card">
           <h2>أهلاً بيك في Top Service</h2>
           <p className="muted">اكتب رقم موبايلك وهنبعتلك كود تحقق من 6 أرقام في رسالة SMS.</p>
-          <p className="muted">لو انت عامل غسيل، ادخل برقمك اللي سجّله الأدمن.</p>
           <label>رقم الموبايل</label>
           <input
             type="tel"
@@ -660,7 +668,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 5</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 6</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -775,9 +783,6 @@ function CustomerView({
   function paidPaymentFor(subId: string): Payment | undefined {
     return payments.find((p) => p.subscriptionId === subId && p.status === 'approved')
   }
-  function openRequestFor(carId: string): WashRequest | undefined {
-    return history.find((w) => w.carId === carId && w.status === 'requested')
-  }
 
   async function addCar(e: FormEvent) {
     e.preventDefault()
@@ -825,8 +830,8 @@ function CustomerView({
     if (!car) return
     const pkg = packageById(subPkg)
     const active = activeSubFor(car.id)
-    if (active && active.washesRemaining > 0) {
-      onNotice(`العربية دي عندها اشتراك نشط — متبقي ${active.washesRemaining} غسلات حتى ${fmtDate(active.endDate)}. استخدمهم الأول، وبعدها جدّد.`)
+    if (active) {
+      onNotice(`العربية دي عندها اشتراك نشط حتى ${fmtDate(active.endDate)} — جدّد بعد ما ينتهي.`)
       return
     }
     if (!isFirebaseConfigured) {
@@ -881,57 +886,7 @@ function CustomerView({
     setSubCarId(null)
     await loadAll()
     onNotice(
-      `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — تقدر تطلب غسلة من دلوقتي. المستحق ${pkg.price} جنيه، والتحصيل من يوم 25.`,
-    )
-  }
-
-  async function requestWash(car: Car, sub: Subscription) {
-    if (washBusy) return
-    if (sub.washesRemaining <= 0) {
-      onNotice('رصيد الغسلات خلص — جدّد اشتراكك الأول (مفيش غسلة مفردة).')
-      return
-    }
-    if (openRequestFor(car.id)) {
-      onNotice('في طلب غسلة جاري للعربية دي — استنى لحد ما يتم، وبعدها اطلب تاني.')
-      return
-    }
-    if (!isFirebaseConfigured) {
-      onNotice('Firebase غير مربوط — مينفعش نبعت طلب الغسلة. اربط مشروع top-service الأول.')
-      return
-    }
-    const id = newDocId('washRequests')
-    if (!id || !customer) {
-      onNotice('Firebase غير مربوط.')
-      return
-    }
-    setWashBusy(car.id)
-    const ok = await saveDoc('washRequests', id, {
-      id,
-      carId: car.id,
-      customerPhone: session.phone,
-      customerName: session.name,
-      carPlate: car.plate,
-      carType: car.type,
-      carColor: car.color,
-      compoundId: customer.compoundId,
-      compoundName: customer.compoundName,
-      building: customer.building,
-      apartment: customer.apartment,
-      subscriptionId: sub.id,
-      status: 'requested',
-      requestedAt: Date.now(),
-      doneAt: null,
-      doneBy: null,
-      doneByPhone: null,
-    })
-    setWashBusy(null)
-    if (!ok) {
-      onNotice('مقدرناش نبعت طلب الغسلة — تأكد إن النت شغال وحاول تاني.')
-      return
-    }
-    await loadAll()
-    onNotice(
-      `تم إرسال طلب الغسلة للعربية ${car.plate} ✅ — عامل الغسيل هيغسلها في يوم جدول الكومباوند (${customer.compoundName})، وهتوصلك تأكيد لما تتم.`,
+      `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${pkg.price} جنيه، والتحصيل من يوم 25.`,
     )
   }
 
@@ -945,8 +900,11 @@ function CustomerView({
       return
     }
     await loadAll()
-    onNotice('تم إلغاء طلب الغسلة — الرصيد متنقصش.')
+    onNotice('تم إلغاء طلب الغسلة.')
   }
+
+  /** كومباوند العميل — لعرض مراحله وأيام غسيل كل عربية. */
+  const myCompound = compounds.find((c) => c.id === customer?.compoundId)
 
   if (loading) {
     return (
@@ -975,7 +933,7 @@ function CustomerView({
           className={`tab${tab === 'history' ? ' active' : ''}`}
           onClick={() => setTab('history')}
         >
-          <CalendarIcon /> طلباتي
+          <CalendarIcon /> سجل الغسيل
         </button>
         <button
           className={`tab${tab === 'profile' ? ' active' : ''}`}
@@ -1012,7 +970,7 @@ function CustomerView({
             const active = activeSubFor(car.id)
             const duePay = active ? duePaymentFor(active.id) : undefined
             const paidPay = active ? paidPaymentFor(active.id) : undefined
-            const open = openRequestFor(car.id)
+            const phase = phaseOf(compounds, customer?.compoundId ?? '', car.phaseId)
             const expired = subs.find(
               (s) => s.carId === car.id && s.status === 'active' && !isSubscriptionActive(s),
             )
@@ -1030,79 +988,42 @@ function CustomerView({
                   {!active && <span className="order-badge gray">بدون اشتراك</span>}
                 </div>
                 {active && (
-                  <div className="balance-wrap" style={{ marginTop: 12 }}>
-                    <div className={`balance-ring${active.washesRemaining <= 0 ? ' empty' : ''}`}>
-                      <span className="num">{active.washesRemaining}</span>
-                      <span className="lbl">غسلة متبقية</span>
+                  <div style={{ marginTop: 12 }}>
+                    <div className="big-line">
+                      باقة {active.washesTotal} غسلات — {active.price} جنيه / شهر
                     </div>
-                    <div className="balance-info">
-                      <div className="big-line">
-                        متبقي {active.washesRemaining} غسلات حتى {fmtDate(active.endDate)}
-                      </div>
-                      <div className="muted">
-                        باقة {active.washesTotal} غسلات — {active.price} جنيه / شهر
-                      </div>
-                      {duePay && (
-                        <div className="muted" style={{ marginTop: 6 }}>
-                          المستحق: {duePay.amount} جنيه — التحصيل من يوم 25
-                        </div>
+                    <div className="muted">نشط حتى آخر الشهر {fmtDate(active.endDate)}</div>
+                    <div className="muted" style={{ marginTop: 6 }}>
+                      📅 أيام الغسيل:{' '}
+                      {phase ? (
+                        <b>
+                          {phaseDaysLabel(phase.days)}
+                          {phase.name ? ` (${phase.name})` : ''}
+                        </b>
+                      ) : (
+                        'لسه متحددتش أيام الغسيل للعربية دي.'
                       )}
-                      {paidPay && (
-                        <div className="muted" style={{ marginTop: 6 }}>
-                          تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}
-                        </div>
-                      )}
-                      {active.washesRemaining <= 2 && (
-                        <div className="warn" style={{ marginTop: 8 }}>
-                          ⚠️ الرصيد قرب يخلص — جدّد اشتراكك قبل ما ينتهي.
-                        </div>
-                      )}
-                      <div className="progress" style={{ marginTop: 8 }}>
-                        <div
-                          className="progress-fill"
-                          style={{
-                            width: `${Math.round((active.washesRemaining / active.washesTotal) * 100)}%`,
-                          }}
-                        />
-                      </div>
                     </div>
+                    {duePay && (
+                      <div className="muted" style={{ marginTop: 6 }}>
+                        المستحق: {duePay.amount} جنيه — التحصيل من يوم 25
+                      </div>
+                    )}
+                    {paidPay && (
+                      <div className="muted" style={{ marginTop: 6 }}>
+                        تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}
+                      </div>
+                    )}
                   </div>
                 )}
                 {!active && (
                   <p className="muted" style={{ marginTop: 10 }}>
                     {expired
-                      ? 'الاشتراك السابق انتهى (خلص الشهر أو خلص الرصيد) — جدّد عشان تكمل.'
+                      ? 'الاشتراك السابق انتهى آخر الشهر — جدّد عشان تكمل.'
                       : 'العربية دي لسه ملهاش اشتراك — اختار باقة من تبويب "باقاتي".'}
                   </p>
                 )}
-                {active && active.washesRemaining > 0 && (
-                  <>
-                    {open ? (
-                      <div className="notice" style={{ marginTop: 10 }}>
-                        ✅ طلب غسلة جاري للعربية دي (من {fmtDateTime(open.requestedAt)}) — عامل الغسيل
-                        هيغسلها في يوم جدول الكومباوند.
-                        <div className="row">
-                          <button
-                            className="link-btn"
-                            onClick={() => void cancelWash(open)}
-                            disabled={washBusy === open.id}
-                          >
-                            إلغاء الطلب (الرصيد مش هينقص)
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        className="btn big"
-                        onClick={() => void requestWash(car, active)}
-                        disabled={washBusy === car.id}
-                      >
-                        <DropIcon /> اطلب غسلة
-                      </button>
-                    )}
-                  </>
-                )}
-                {(!active || active.washesRemaining <= 0) && (
+                {!active && (
                   <button className="btn big plum" onClick={() => setTab('packages')}>
                     <RefreshIcon /> تجديد الاشتراك
                   </button>
@@ -1113,15 +1034,20 @@ function CustomerView({
           <div className="card">
             <h3>📅 جدول الغسيل</h3>
             <p className="muted">
-              الغسيل بيتم في أيام جدول الشركة الثابت لكل كومباوند — انت بتختار العربية بس،
-              وعامل الغسيل بييجي في يوم الجدول.
-              {customer?.compoundName
-                ? ` كومباوند ${customer.compoundName}: ${
-                    compounds.find((c) => c.name === customer.compoundName)?.scheduleNote ||
-                    'الجدول عند الإدارة'
-                  }.`
-                : ''}
+              الغسيل بيتم في أيام المراحل الثابتة اللي حددتها الشركة لكومباوندك — عربيتك
+              بتتغسل في يوم المرحلة بتاعتها، وانت مبتطلبش حاجة.
             </p>
+            {myCompound && myCompound.phases.length > 0 ? (
+              myCompound.phases.map((p) => (
+                <div key={p.id} className="muted">
+                  مرحلة {p.name}: {phaseDaysLabel(p.days)}
+                </div>
+              ))
+            ) : (
+              <p className="muted">
+                {customer ? 'لسه متضافتش مراحل للكومباوند ده.' : ''}
+              </p>
+            )}
           </div>
         </>
       )}
@@ -1141,9 +1067,7 @@ function CustomerView({
                   </div>
                 </div>
                 {activeSubFor(car.id) ? (
-                  <span className="order-badge green">
-                    متبقي {activeSubFor(car.id)?.washesRemaining} غسلات
-                  </span>
+                  <span className="order-badge green">اشتراك نشط</span>
                 ) : (
                   <span className="order-badge gray">بدون اشتراك نشط</span>
                 )}
@@ -1195,8 +1119,8 @@ function CustomerView({
         <div className="card">
           <h2>باقاتي</h2>
           <p className="muted">
-            كل عربية لها اشتراك منفصل. الغسلات غير المستخدمة تنتهي آخر الشهر ولا تُرحَّل،
-            ولو خلص الرصيد جدّد اشتراكك مبكراً — مفيش غسلة مفردة.
+            كل عربية لها اشتراك شهري منفصل. الاشتراك بينتهي آخر الشهر، والتجديد من هنا —
+            مفيش غسلة مفردة.
           </p>
           {cars.length === 0 && <p className="muted">ضيف عربية الأول من تبويب "عربياتي".</p>}
           {cars.map((car) => {
@@ -1211,8 +1135,8 @@ function CustomerView({
                 </b>
                 {active && (
                   <p className="muted">
-                    اشتراك نشط: باقة {active.washesTotal} غسلات — متبقي{' '}
-                    {active.washesRemaining} حتى {fmtDate(active.endDate)}
+                    اشتراك نشط: باقة {active.washesTotal} غسلات — {active.price} جنيه / شهر —
+                    نشط حتى {fmtDate(active.endDate)}
                   </p>
                 )}
                 {active && duePay && (
@@ -1233,7 +1157,7 @@ function CustomerView({
                     setSubPkg(4)
                     setSubMethod('cash')
                   }}
-                  disabled={!!active && active.washesRemaining > 0}
+                  disabled={!!active}
                 >
                   {subCarId === car.id ? 'إلغاء الاختيار' : 'اشترك / جدّد'}
                 </button>
@@ -1297,8 +1221,8 @@ function CustomerView({
 
       {tab === 'history' && (
         <div className="card">
-          <h2>طلباتي وسجل الغسيل</h2>
-          {history.length === 0 && <p className="muted">لسه مفيش طلبات غسيل.</p>}
+          <h2>سجل الغسيل</h2>
+          {history.length === 0 && <p className="muted">لسه مفيش غسلات مسجلة.</p>}
           {history.map((w) => (
             <div className="ride" key={w.id}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -1310,11 +1234,20 @@ function CustomerView({
                 {w.status === 'cancelled' && <span className="order-badge gray">ملغاة</span>}
               </div>
               <div className="muted">
-                طلبت {fmtDateTime(w.requestedAt)}
                 {w.status === 'done' && w.doneAt
-                  ? ` — اتغسلت ${fmtDateTime(w.doneAt)}${w.doneBy ? ` (بواسطة ${w.doneBy})` : ''}`
-                  : ''}
+                  ? `اتغسلت ${fmtDateTime(w.doneAt)}`
+                  : `طلبت ${fmtDateTime(w.requestedAt)}`}
               </div>
+              {w.photoUrl && (
+                <a href={w.photoUrl} target="_blank" rel="noreferrer">
+                  <img
+                    className="avatar"
+                    src={w.photoUrl}
+                    alt="صورة الغسلة"
+                    style={{ width: 72, height: 72 }}
+                  />
+                </a>
+              )}
               {w.status === 'requested' && (
                 <button
                   className="link-btn"
@@ -1380,33 +1313,56 @@ function WasherView({
 }) {
   const [tab, setTab] = useState<'today' | 'history'>('today')
   const [washer, setWasher] = useState<Washer | null>(null)
-  const [requests, setRequests] = useState<WashRequest[]>([])
+  const [customers, setCustomers] = useState<Customer[]>([])
+  const [allCars, setAllCars] = useState<Car[]>([])
+  const [subs, setSubs] = useState<Subscription[]>([])
+  const [doneToday, setDoneToday] = useState<WashRequest[]>([])
   const [doneList, setDoneList] = useState<WashRequest[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [compounds, setCompounds] = useState<Compound[]>([])
+  // صور الغسلات المختارة (لكل عربية) — بتتبعت مع "تم الغسيل"، واختيارية
+  const [washPhotos, setWashPhotos] = useState<Record<string, string | null>>({})
+
+  /** غسلات النهاردة المنجزة (من السجل العام — نقرأها ونصفّي محلياً). */
+  async function loadDoneToday(): Promise<WashRequest[]> {
+    const rows = await loadCollection('washRequests')
+    const start = todayStart()
+    return rows
+      .map((r) => normalizeWash(r.id, r))
+      .filter((w) => w.status === 'done' && (w.doneAt ?? 0) >= start)
+      .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
+  }
 
   const loadAll = async () => {
-    const [w, reqs, done, comps] = await Promise.all([
+    const [w, cs, cars, ss, done, hist, comps] = await Promise.all([
       loadWasher(session.phone),
-      loadOpenWashRequests(),
+      loadAllCustomers(),
+      loadAllCars(),
+      loadAllSubscriptions(),
+      loadDoneToday(),
       loadWasherDoneWashes(session.phone),
       loadCompounds(),
     ])
     setWasher(w)
-    setRequests(reqs)
-    setDoneList(done)
+    setCustomers(cs)
+    setAllCars(cars)
+    setSubs(ss)
+    setDoneToday(done)
+    setDoneList(hist)
     setCompounds(comps)
     setLoading(false)
   }
 
   useEffect(() => {
     void loadAll()
-    const un = subscribeCollection('washRequests', (rows) => {
+    const un1 = subscribeCollection('washRequests', (rows) => {
       const all = rows.map((r) => normalizeWash(r.id, r))
-      setRequests(
-        all.filter((w) => w.status === 'requested').sort((a, b) => a.requestedAt - b.requestedAt),
+      setDoneToday(
+        all
+          .filter((w) => w.status === 'done' && (w.doneAt ?? 0) >= todayStart())
+          .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0)),
       )
       setDoneList(
         all
@@ -1414,48 +1370,79 @@ function WasherView({
           .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0)),
       )
     })
-    return () => un()
+    const un2 = subscribeCollection('cars', (rows) => {
+      setAllCars(rows.map((r) => normalizeCar(r.id, r)))
+    })
+    const un3 = subscribeCollection('subscriptions', (rows) => {
+      setSubs(rows.map((r) => normalizeSubscription(r.id, r)))
+    })
+    return () => {
+      un1()
+      un2()
+      un3()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.phone])
 
-  /** طلبات اليوم الخاصة بعامل الغسيل: كومباونداته المربوطة (لو مفيش ربط — كل الطلبات). */
-  const myRequests = useMemo(() => {
-    if (washer && washer.compoundIds.length > 0) {
-      return requests.filter((w) => washer.compoundIds.includes(w.compoundId))
+  /** عربيات النهاردة من جدول المراحل: مرحلتها تشمل النهاردة، واشتراك
+   *  شهري نشط، ولسه متغسلتش النهاردة — كومباونداته المربوطة بس
+   *  (لو مفيش ربط — كل الكومباوندات). */
+  const entries = useMemo(
+    () => todayCars(allCars, customers, subs, compounds, doneToday, washer?.compoundIds),
+    [allCars, customers, subs, compounds, doneToday, washer],
+  )
+
+  /** عربيات باشتراك نشط لسه متحددلهاش مرحلة — عشان الأدمن يحددها. */
+  const unassignedCount = useMemo(() => {
+    let n = 0
+    for (const car of allCars) {
+      const customer = customers.find((c) => c.phone === car.customerPhone)
+      if (!customer) continue
+      if (
+        washer &&
+        washer.compoundIds.length > 0 &&
+        !washer.compoundIds.includes(customer.compoundId)
+      ) {
+        continue
+      }
+      if (!subs.some((s) => s.carId === car.id && isSubscriptionActive(s))) continue
+      const compound = compounds.find((c) => c.id === customer.compoundId)
+      const phase = car.phaseId ? compound?.phases?.find((p) => p.id === car.phaseId) : undefined
+      if (!phase) n++
     }
-    return requests
-  }, [requests, washer])
+    return n
+  }, [allCars, customers, subs, compounds, washer])
 
   /** البحث الفوري: لوحة (حروف/أرقام) أو نوع العربية أو اسم العميل أو رقمه. */
   const filtered = useMemo(() => {
     const q = norm(search)
-    if (!q) return myRequests
-    return myRequests.filter((w) => {
+    if (!q) return entries
+    return entries.filter((e) => {
       const hay = [
-        norm(w.carPlate),
-        norm(w.carType),
-        norm(w.customerName),
-        norm(w.customerPhone),
-        norm(w.compoundName),
-        norm(w.building),
+        norm(e.car.plate),
+        norm(e.car.type),
+        norm(e.customer.name),
+        norm(e.customer.phone),
+        norm(e.compound.name),
+        norm(e.customer.building),
       ].join(' ')
       return hay.includes(q)
     })
-  }, [myRequests, search])
+  }, [entries, search])
 
   /** تجميع بالكومباوند ثم العمارة — عشان يغسل كل عربيات العمارة في جولة واحدة. */
   const grouped = useMemo(() => {
-    const groups = new Map<string, Map<string, WashRequest[]>>()
-    for (const w of filtered) {
-      const compKey = w.compoundName || 'بدون كومباوند'
+    const groups = new Map<string, Map<string, TodayCar[]>>()
+    for (const e of filtered) {
+      const compKey = e.compound.name || 'بدون كومباوند'
       let byBuilding = groups.get(compKey)
       if (!byBuilding) {
-        byBuilding = new Map<string, WashRequest[]>()
+        byBuilding = new Map<string, TodayCar[]>()
         groups.set(compKey, byBuilding)
       }
-      const bKey = `عمارة ${w.building || '—'}`
+      const bKey = `عمارة ${e.customer.building || '—'}`
       const list = byBuilding.get(bKey) ?? []
-      list.push(w)
+      list.push(e)
       byBuilding.set(bKey, list)
     }
     return [...groups.entries()].map(([comp, byBuilding]) => ({
@@ -1464,15 +1451,25 @@ function WasherView({
     }))
   }, [filtered])
 
-  async function markDone(w: WashRequest) {
+  async function markDone(e: TodayCar) {
     if (busyId) return
-    setBusyId(w.id)
-    const r = await completeWash(w.id, session.name || 'عامل الغسيل', session.phone)
+    setBusyId(e.car.id)
+    const r = await recordWashDone(
+      e,
+      session.name || 'عامل الغسيل',
+      session.phone,
+      washPhotos[e.car.id] ?? null,
+    )
     setBusyId(null)
     if (!r.ok) {
       onNotice(r.message)
       return
     }
+    setWashPhotos((prev) => {
+      const next = { ...prev }
+      delete next[e.car.id]
+      return next
+    })
     await loadAll()
     onNotice(r.message)
   }
@@ -1510,7 +1507,7 @@ function WasherView({
                   ? `كومباونداتك: ${washer.compoundIds
                       .map((id) => compounds.find((c) => c.id === id)?.name ?? id)
                       .join('، ')}`
-                  : 'لسه متربطتش بكومباوندات — شايف كل الطلبات لحد ما الأدمن يربطك.'}
+                  : 'لسه متربطتش بكومباوندات — شايف كل عربيات النهاردة لحد ما الأدمن يربطك.'}
               </p>
             </div>
           </div>
@@ -1525,13 +1522,19 @@ function WasherView({
           </div>
           <div className="row">
             <span className="badge">
-              <CarIcon /> {filtered.length} عربية في القائمة
+              <CarIcon /> {filtered.length} عربية النهاردة — {WEEKDAY_NAMES[todayWeekday()]}
             </span>
           </div>
+          {unassignedCount > 0 && (
+            <p className="muted">
+              في {unassignedCount} عربية باشتراك نشط لسه متحددلهاش مرحلة — الأدمن يحددها من
+              لوحة التحكم.
+            </p>
+          )}
           {filtered.length === 0 && (
             <div className="card">
               <p className="muted">
-                {search ? 'مفيش عربية مطابقة للبحث ده.' : 'مفيش طلبات غسيل جارية دلوقتي.'}
+                {search ? 'مفيش عربية مطابقة للبحث ده.' : 'مفيش عربيات في جدول النهاردة.'}
               </p>
             </div>
           )}
@@ -1543,26 +1546,37 @@ function WasherView({
               {g.buildings.map((bg) => (
                 <div key={bg.b}>
                   <h3 style={{ margin: '10px 4px 4px' }}>{bg.b}</h3>
-                  {bg.list.map((w) => (
-                    <div className="ride" key={w.id}>
+                  {bg.list.map((e) => (
+                    <div className="ride" key={e.car.id}>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
                         <b>
-                          {w.carType} — {w.carPlate}
+                          {e.car.type} — {e.car.plate}
                         </b>
-                        <span className="order-badge">{w.carColor || 'بدون لون'}</span>
+                        <span className="order-badge">{e.car.color || 'بدون لون'}</span>
                       </div>
                       <div className="muted">
-                        العميل: {w.customerName} — {w.customerPhone}
+                        العميل: {e.customer.name} — {e.customer.phone}
                       </div>
                       <div className="muted">
-                        شقة {w.apartment} — طلب {fmtDateTime(w.requestedAt)}
+                        شقة {e.customer.apartment} — مرحلة {e.phase.name}:{' '}
+                        {phaseDaysLabel(e.phase.days)}
                       </div>
+                      <div className="muted" style={{ marginTop: 8 }}>
+                        📷 صورة الغسلة (اختياري) — إثبات للعميل
+                      </div>
+                      <PhotoField
+                        photo={washPhotos[e.car.id] ?? null}
+                        onPhoto={(p) =>
+                          setWashPhotos((prev) => ({ ...prev, [e.car.id]: p }))
+                        }
+                        notice={onNotice}
+                      />
                       <button
                         className="btn big active"
-                        onClick={() => void markDone(w)}
-                        disabled={busyId === w.id}
+                        onClick={() => void markDone(e)}
+                        disabled={busyId === e.car.id}
                       >
-                        <CheckIcon /> {busyId === w.id ? 'بيحفظ…' : 'تم الغسيل'}
+                        <CheckIcon /> {busyId === e.car.id ? 'بيحفظ…' : 'تم الغسيل'}
                       </button>
                     </div>
                   ))}
@@ -1590,6 +1604,16 @@ function WasherView({
                 {w.customerName} — {w.compoundName} — عمارة {w.building} — شقة {w.apartment}
               </div>
               <div className="muted">{w.doneAt ? fmtDateTime(w.doneAt) : ''}</div>
+              {w.photoUrl && (
+                <a href={w.photoUrl} target="_blank" rel="noreferrer">
+                  <img
+                    className="avatar"
+                    src={w.photoUrl}
+                    alt="صورة الغسلة"
+                    style={{ width: 72, height: 72 }}
+                  />
+                </a>
+              )}
             </div>
           ))}
           <button className="btn danger big" onClick={onLogout}>
@@ -1598,6 +1622,86 @@ function WasherView({
         </div>
       )}
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+//  محرر مراحل كومباوند — إضافة/حذف مرحلة (اسم + أيام أسبوع)
+// ---------------------------------------------------------------------------
+
+/** ترتيب اختيار الأيام: الأسبوع بيبدأ من السبت عندنا. */
+const WEEK_PICK_ORDER = [6, 0, 1, 2, 3, 4, 5]
+
+function PhaseEditor({
+  phases,
+  onChange,
+}: {
+  phases: Phase[]
+  onChange: (p: Phase[]) => void
+}) {
+  const [name, setName] = useState('')
+  const [days, setDays] = useState<number[]>([])
+
+  function toggleDay(d: number) {
+    setDays((prev) =>
+      prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d].sort((a, b) => a - b),
+    )
+  }
+
+  function addPhase() {
+    if (days.length === 0) return
+    const label = phaseDaysLabel(days)
+    const phase: Phase = {
+      id: `ph_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: name.trim() || label,
+      days: [...days].sort((a, b) => a - b),
+    }
+    onChange([...phases, phase])
+    setName('')
+    setDays([])
+  }
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label>المراحل (مجموعات أيام الغسيل)</label>
+      {phases.length === 0 && <p className="muted">لسه مفيش مراحل — ضيف أول مرحلة تحت.</p>}
+      {phases.map((p) => (
+        <div key={p.id} className="row" style={{ justifyContent: 'space-between' }}>
+          <span>
+            <b>{p.name}</b> <span className="muted">— {phaseDaysLabel(p.days)}</span>
+          </span>
+          <button
+            type="button"
+            className="btn small danger"
+            onClick={() => onChange(phases.filter((x) => x.id !== p.id))}
+          >
+            حذف
+          </button>
+        </div>
+      ))}
+      <label>اسم المرحلة الجديدة (اختياري — لو فاضي هيبقى اسمها الأيام)</label>
+      <input
+        type="text"
+        placeholder="مثال: مرحلة أولى"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <label>أيام المرحلة</label>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        {WEEK_PICK_ORDER.map((d) => (
+          <label
+            key={d}
+            style={{ display: 'flex', gap: 6, alignItems: 'center', fontWeight: 600 }}
+          >
+            <input type="checkbox" checked={days.includes(d)} onChange={() => toggleDay(d)} />
+            {WEEKDAY_NAMES[d]}
+          </label>
+        ))}
+      </div>
+      <button type="button" className="btn small" onClick={addPhase} disabled={days.length === 0}>
+        <PlusIcon /> إضافة المرحلة
+      </button>
+    </div>
   )
 }
 
@@ -1626,15 +1730,16 @@ function AdminView({
   const [subs, setSubs] = useState<Subscription[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [washers, setWashers] = useState<Washer[]>([])
-  const [requests, setRequests] = useState<WashRequest[]>([])
   const [doneToday, setDoneToday] = useState<WashRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [payBusy, setPayBusy] = useState<string | null>(null)
+  // صور الغسلات المختارة (لكل عربية) — بتتبعت مع "تم الغسيل"، واختيارية
+  const [adminPhotos, setAdminPhotos] = useState<Record<string, string | null>>({})
   // إدارة: إضافة كومباوند
   const [newCompoundName, setNewCompoundName] = useState('')
-  const [newCompoundSchedule, setNewCompoundSchedule] = useState('')
+  const [newCompoundPhases, setNewCompoundPhases] = useState<Phase[]>([])
   // إدارة: إضافة عامل الغسيل
   const [newWasherName, setNewWasherName] = useState('')
   const [newWasherPhone, setNewWasherPhone] = useState('')
@@ -1642,7 +1747,7 @@ function AdminView({
   // تعديل: كومباوند
   const [editingCompoundId, setEditingCompoundId] = useState<string | null>(null)
   const [editCompoundName, setEditCompoundName] = useState('')
-  const [editCompoundSchedule, setEditCompoundSchedule] = useState('')
+  const [editCompoundPhases, setEditCompoundPhases] = useState<Phase[]>([])
   // تعديل: عامل غسيل
   const [editingWasherPhone, setEditingWasherPhone] = useState<string | null>(null)
   const [editWasherName, setEditWasherName] = useState('')
@@ -1659,20 +1764,18 @@ function AdminView({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   const loadAll = async () => {
-    const [cs, cars, ss, ps, ws, reqs] = await Promise.all([
+    const [cs, cars, ss, ps, ws] = await Promise.all([
       loadAllCustomers(),
       loadAllCars(),
       loadAllSubscriptions(),
       loadAllPayments(),
       loadAllWashers(),
-      loadOpenWashRequests(),
     ])
     setCustomers(cs)
     setAllCars(cars)
     setSubs(ss)
     setPayments(ps)
     setWashers(ws)
-    setRequests(reqs)
     // غسلات اليوم المنجزة (من كل الطلبات المكتملة النهاردة — نقرأها من السجل العام)
     const all = await loadCollectionForDoneToday()
     setDoneToday(all)
@@ -1705,9 +1808,6 @@ function AdminView({
     })
     const un3 = subscribeCollection('washRequests', (rows) => {
       const all = rows.map((r) => normalizeWash(r.id, r))
-      setRequests(
-        all.filter((w) => w.status === 'requested').sort((a, b) => a.requestedAt - b.requestedAt),
-      )
       setDoneToday(
         all
           .filter((w) => w.status === 'done' && (w.doneAt ?? 0) >= todayStart())
@@ -1735,13 +1835,11 @@ function AdminView({
     const revenue = payments
       .filter((p) => p.status === 'approved' && sameMonth(p.createdAt, Date.now()))
       .reduce((sum, p) => sum + p.amount, 0)
-    const totalRemaining = activeSubs.reduce((sum, s) => sum + s.washesRemaining, 0)
     return {
       subscribers: customers.length,
       activeSubs: activeSubs.length,
       revenue,
       todayWashes: doneToday.length,
-      totalRemaining,
     }
   }, [customers, subs, payments, doneToday])
 
@@ -1790,17 +1888,48 @@ function AdminView({
     onNotice(r.message)
   }
 
-  async function markDone(w: WashRequest) {
+  /** عربيات النهاردة من جدول المراحل — كل الكومباوندات. */
+  const todayEntries = useMemo(
+    () => todayCars(allCars, customers, subs, compounds, doneToday),
+    [allCars, customers, subs, compounds, doneToday],
+  )
+
+  async function markDone(e: TodayCar) {
     if (busyId) return
-    setBusyId(w.id)
-    const r = await completeWash(w.id, 'الأدمن (صلاح)', session.phone)
+    setBusyId(e.car.id)
+    const r = await recordWashDone(
+      e,
+      'الأدمن (صلاح)',
+      session.phone,
+      adminPhotos[e.car.id] ?? null,
+    )
     setBusyId(null)
     if (!r.ok) {
       onNotice(r.message)
       return
     }
+    setAdminPhotos((prev) => {
+      const next = { ...prev }
+      delete next[e.car.id]
+      return next
+    })
     await loadAll()
     onNotice(r.message)
+  }
+
+  async function changeCarPhase(car: Car, phaseId: string) {
+    if (busyId) return
+    setBusyId(`phase:${car.id}`)
+    const ok = await saveDoc('cars', car.id, { phaseId: phaseId || null })
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ المرحلة — حاول تاني.')
+      return
+    }
+    await loadAll()
+    onNotice(
+      phaseId ? `تم تحديد مرحلة العربية ${car.plate} ✅` : `تم إلغاء مرحلة العربية ${car.plate}.`,
+    )
   }
 
   async function addCompound(e: FormEvent) {
@@ -1819,7 +1948,7 @@ function AdminView({
     const ok = await saveDoc('compounds', id, {
       id,
       name: newCompoundName.trim(),
-      scheduleNote: newCompoundSchedule.trim(),
+      phases: newCompoundPhases,
       createdAt: Date.now(),
     })
     setBusyId(null)
@@ -1828,7 +1957,7 @@ function AdminView({
       return
     }
     setNewCompoundName('')
-    setNewCompoundSchedule('')
+    setNewCompoundPhases([])
     const list = await loadCompounds()
     onCompounds(list)
     onNotice(`تمت إضافة كومباوند ${newCompoundName.trim()} ✅`)
@@ -1879,7 +2008,7 @@ function AdminView({
   function startEditCompound(c: Compound) {
     setEditingCompoundId(c.id)
     setEditCompoundName(c.name)
-    setEditCompoundSchedule(c.scheduleNote)
+    setEditCompoundPhases([...(c.phases ?? [])])
     setConfirmDeleteId(null)
   }
 
@@ -1890,15 +2019,29 @@ function AdminView({
       onNotice('اكتب اسم الكومباوند.')
       return
     }
+    const oldCompound = compounds.find((c) => c.id === editingCompoundId)
+    const removedPhaseIds = (oldCompound?.phases ?? [])
+      .map((p) => p.id)
+      .filter((id) => !editCompoundPhases.some((p) => p.id === id))
     setBusyId(`edit-compound:${editingCompoundId}`)
     const ok = await saveDoc('compounds', editingCompoundId, {
       name: editCompoundName.trim(),
-      scheduleNote: editCompoundSchedule.trim(),
+      phases: editCompoundPhases,
     })
     setBusyId(null)
     if (!ok) {
       onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ التعديل — حاول تاني.')
       return
+    }
+    // المراحل اللي اتحذفت: نشيلها من أي عربية كانت مربوطة بيها
+    if (removedPhaseIds.length > 0) {
+      const cars = await loadAllCars()
+      await Promise.all(
+        cars
+          .filter((car) => car.phaseId && removedPhaseIds.includes(car.phaseId))
+          .map((car) => saveDoc('cars', car.id, { phaseId: null })),
+      )
+      await loadAll()
     }
     setEditingCompoundId(null)
     const list = await loadCompounds()
@@ -2122,10 +2265,6 @@ function AdminView({
               <div className="k">غسلات اليوم (تمت)</div>
             </div>
             <div className="stat">
-              <div className="v">{stats.totalRemaining}</div>
-              <div className="k">غسلات متبقية إجمالي</div>
-            </div>
-            <div className="stat">
               <div className="v">{duePayments.length}</div>
               <div className="k">مستحقات للتحصيل</div>
             </div>
@@ -2186,12 +2325,14 @@ function AdminView({
                         (p) => p.subscriptionId === latestSub.id && p.status === 'due',
                       )
                     : undefined
+                  const carCompound = compounds.find((x) => x.id === c.compoundId)
+                  const carPhases = carCompound?.phases ?? []
                   return (
                     <div key={car.id} className="muted" style={{ marginTop: 6 }}>
                       🚗 {car.type} — {car.plate} —{' '}
                       {active ? (
                         <b style={{ color: '#15803d' }}>
-                          نشط: متبقي {active.washesRemaining} حتى {fmtDate(active.endDate)}
+                          نشط حتى {fmtDate(active.endDate)}
                         </b>
                       ) : duePay ? (
                         <b style={{ color: '#8a3d24' }}>
@@ -2200,6 +2341,27 @@ function AdminView({
                       ) : (
                         <span>بدون اشتراك نشط</span>
                       )}
+                      <div style={{ marginTop: 6 }}>
+                        {carPhases.length === 0 ? (
+                          <span>ضيف مراحل للكومباوند من تبويب الإدارة الأول.</span>
+                        ) : (
+                          <label style={{ display: 'block' }}>
+                            المرحلة:{' '}
+                            <select
+                              value={car.phaseId ?? ''}
+                              onChange={(e) => void changeCarPhase(car, e.target.value)}
+                              disabled={busyId === `phase:${car.id}`}
+                            >
+                              <option value="">بدون مرحلة</option>
+                              {carPhases.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name} — {phaseDaysLabel(p.days)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                      </div>
                     </div>
                   )
                 })}
@@ -2356,29 +2518,42 @@ function AdminView({
 
       {tab === 'today' && (
         <div className="card">
-          <h2>غسلات اليوم</h2>
+          <h2>غسلات اليوم — {WEEKDAY_NAMES[todayWeekday()]}</h2>
           <p className="muted">
-            طلبات جارية: {requests.length} — تمت النهاردة: {doneToday.length}
+            عربيات النهاردة: {todayEntries.length} — تمت النهاردة: {doneToday.length}
           </p>
-          {requests.length === 0 && <p className="muted">مفيش طلبات غسيل جارية دلوقتي.</p>}
-          {requests.map((w) => (
-            <div className="ride" key={w.id}>
+          {todayEntries.length === 0 && (
+            <p className="muted">مفيش عربيات في جدول النهاردة.</p>
+          )}
+          {todayEntries.map((e) => (
+            <div className="ride" key={e.car.id}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <b>
-                  {w.carType} — {w.carPlate}
+                  {e.car.type} — {e.car.plate}
                 </b>
-                <span className="order-badge">{w.compoundName}</span>
+                <span className="order-badge">{e.compound.name}</span>
               </div>
               <div className="muted">
-                {w.customerName} — {w.customerPhone} — عمارة {w.building} — شقة {w.apartment}
+                {e.customer.name} — {e.customer.phone} — عمارة {e.customer.building} — شقة{' '}
+                {e.customer.apartment}
               </div>
-              <div className="muted">طلب {fmtDateTime(w.requestedAt)}</div>
+              <div className="muted">
+                مرحلة {e.phase.name}: {phaseDaysLabel(e.phase.days)}
+              </div>
+              <div className="muted" style={{ marginTop: 8 }}>
+                📷 صورة الغسلة (اختياري) — إثبات للعميل
+              </div>
+              <PhotoField
+                photo={adminPhotos[e.car.id] ?? null}
+                onPhoto={(p) => setAdminPhotos((prev) => ({ ...prev, [e.car.id]: p }))}
+                notice={onNotice}
+              />
               <button
                 className="btn big active"
-                onClick={() => void markDone(w)}
-                disabled={busyId === w.id}
+                onClick={() => void markDone(e)}
+                disabled={busyId === e.car.id}
               >
-                <CheckIcon /> {busyId === w.id ? 'بيحفظ…' : 'تم الغسيل'}
+                <CheckIcon /> {busyId === e.car.id ? 'بيحفظ…' : 'تم الغسيل'}
               </button>
             </div>
           ))}
@@ -2393,6 +2568,16 @@ function AdminView({
                   <div className="muted">
                     {w.customerName} — {w.doneBy ?? ''} — {w.doneAt ? fmtDateTime(w.doneAt) : ''}
                   </div>
+                  {w.photoUrl && (
+                    <a href={w.photoUrl} target="_blank" rel="noreferrer">
+                      <img
+                        className="avatar"
+                        src={w.photoUrl}
+                        alt="صورة الغسلة"
+                        style={{ width: 72, height: 72 }}
+                      />
+                    </a>
+                  )}
                 </div>
               ))}
             </>
@@ -2409,7 +2594,15 @@ function AdminView({
                 <b>
                   <BuildingIcon /> {c.name}
                 </b>
-                {c.scheduleNote && <div className="muted">الجدول: {c.scheduleNote}</div>}
+                {(c.phases ?? []).length === 0 ? (
+                  <div className="muted">لسه مفيش مراحل — ضيف من التعديل.</div>
+                ) : (
+                  (c.phases ?? []).map((p) => (
+                    <div key={p.id} className="muted">
+                      مرحلة {p.name}: {phaseDaysLabel(p.days)}
+                    </div>
+                  ))
+                )}
                 {editingCompoundId === c.id ? (
                   <form onSubmit={(e) => void saveEditCompound(e)} style={{ marginTop: 10 }}>
                     <label>اسم الكومباوند</label>
@@ -2418,12 +2611,7 @@ function AdminView({
                       value={editCompoundName}
                       onChange={(e) => setEditCompoundName(e.target.value)}
                     />
-                    <label>جدول الغسيل الثابت (اختياري)</label>
-                    <input
-                      type="text"
-                      value={editCompoundSchedule}
-                      onChange={(e) => setEditCompoundSchedule(e.target.value)}
-                    />
+                    <PhaseEditor phases={editCompoundPhases} onChange={setEditCompoundPhases} />
                     <div className="row">
                       <button
                         className="btn small active"
@@ -2466,13 +2654,7 @@ function AdminView({
                 value={newCompoundName}
                 onChange={(e) => setNewCompoundName(e.target.value)}
               />
-              <label>جدول الغسيل الثابت (اختياري)</label>
-              <input
-                type="text"
-                placeholder="مثال: السبت والثلاثاء"
-                value={newCompoundSchedule}
-                onChange={(e) => setNewCompoundSchedule(e.target.value)}
-              />
+              <PhaseEditor phases={newCompoundPhases} onChange={setNewCompoundPhases} />
               <button className="btn big" type="submit" disabled={busyId === 'compound'}>
                 <PlusIcon /> إضافة الكومباوند
               </button>

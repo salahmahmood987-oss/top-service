@@ -34,6 +34,8 @@ export interface Car {
   plate: string
   /** صورة العربية (Data URL مضغوطة) — اختيارية */
   photoUrl: string | null
+  /** المرحلة المحددة للعربية من مراحل كومباوند العميل — null = لسه متحددتش */
+  phaseId: string | null
   createdAt: number
 }
 
@@ -70,7 +72,8 @@ export interface Subscription {
   packageId: 4 | 8 | 12
   price: number
   washesTotal: number
-  /** الغسلات المتبقية — تنقص 1 مع كل غسلة مكتملة */
+  /** حقل قديم للتوافق مع مستندات سابقة — الرصيد شهري مش عدد غسلات،
+   *  فمفيش حاجة بتقرا الحقل ده كبوابة أو بتعرضه كرصيد. */
   washesRemaining: number
   status: SubscriptionStatus
   /** بداية الاشتراك (وقت موافقة الأدمن) */
@@ -120,6 +123,8 @@ export interface WashRequest {
   /** مين اللي علّم "تم الغسيل": اسم عامل الغسيل أو الأدمن */
   doneBy: string | null
   doneByPhone: string | null
+  /** صورة الغسلة كإثبات للعميل (Data URL مضغوطة) — اختيارية */
+  photoUrl: string | null
 }
 
 export interface Washer {
@@ -131,12 +136,50 @@ export interface Washer {
   createdAt: number
 }
 
+/** مرحلة غسيل داخل كومباوند — مجموعة أيام أسبوع ثابتة. */
+export interface Phase {
+  id: string
+  name: string
+  /** أيام الأسبوع بأرقام getDay(): 0=الأحد … 6=السبت */
+  days: number[]
+}
+
 export interface Compound {
   id: string
   name: string
   /** ملاحظة جدول الشركة الثابت للكومباوند، مثال: "السبت والثلاثاء" */
   scheduleNote: string
+  /** مراحل الغسيل في الكومباوند — كل مرحلة مجموعة أيام أسبوع */
+  phases: Phase[]
   createdAt: number
+}
+
+/** أسماء أيام الأسبوع بالعربي — الفهرس = رقم getDay(). */
+export const WEEKDAY_NAMES: string[] = [
+  'الأحد',
+  'الاثنين',
+  'الثلاثاء',
+  'الأربعاء',
+  'الخميس',
+  'الجمعة',
+  'السبت',
+]
+
+/** ترتيب العرض: الأسبوع بيبدأ من السبت عندنا. */
+const WEEK_ORDER = [6, 0, 1, 2, 3, 4, 5]
+
+/** "أحد، ثلاثاء، خميس" — من أرقام getDay(). */
+export function phaseDaysLabel(days: number[]): string {
+  return [...days]
+    .sort((a, b) => WEEK_ORDER.indexOf(a) - WEEK_ORDER.indexOf(b))
+    .map((d) => WEEKDAY_NAMES[d] ?? '')
+    .filter(Boolean)
+    .join('، ')
+}
+
+/** رقم يوم النهاردة بأرقام getDay() — 0=الأحد … 6=السبت. */
+export function todayWeekday(): number {
+  return new Date().getDay()
 }
 
 /** هل نافذة التحصيل مفتوحة؟ التحصيل المؤخر يبدأ من يوم 25 من الشهر. */
@@ -156,9 +199,10 @@ export function isSubscriptionTimeExpired(sub: Subscription, now = Date.now()): 
   return now > sub.endDate
 }
 
-/** هل الاشتراك نشط فعلاً؟ (موافق عليه + رصيد > 0 + لسه في الشهر) */
+/** هل الاشتراك نشط فعلاً؟ (موافق عليه + لسه في الشهر — الرصيد شهري
+ *  مش عدد غسلات: العربية بتتغسل في أيام مرحلتها طول الشهر) */
 export function isSubscriptionActive(sub: Subscription, now = Date.now()): boolean {
-  return sub.status === 'active' && sub.washesRemaining > 0 && now <= sub.endDate
+  return sub.status === 'active' && now <= sub.endDate
 }
 
 export const OTP_MAX_PER_HOUR = 3 // حد طلبات الكود: 3 في الساعة لكل رقم

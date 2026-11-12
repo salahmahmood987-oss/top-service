@@ -17,11 +17,11 @@
 //  مجموعات Firestore:
 //    customers/{phone}     — name, code, compoundId, building, apartment, photoUrl
 //    cars/{id}             — customerPhone, type, color, plate, photoUrl
-//    subscriptions/{id}    — carId, packageId, price, washesRemaining, status, endDate
+//    subscriptions/{id}    — carId, packageId, price, status, endDate
 //    payments/{id}          — subscriptionId, amount, method, status, receiptNo
 //    washRequests/{id}      — carId, compoundId, building, status, requestedAt, doneAt
 //    washers/{phone}        — name, compoundIds, active
-//    compounds/{id}         — name, scheduleNote
+//    compounds/{id}         — name, scheduleNote, phases
 //    settings/counters      — paymentSeq (لأرقام الإيصالات)
 // ---------------------------------------------------------------------------
 import {
@@ -47,11 +47,13 @@ import type {
   Compound,
   Customer,
   Payment,
+  Phase,
   Subscription,
   Washer,
   WashRequest,
 } from './types'
 import { monthEndTimestamp } from './types'
+import type { TodayCar } from './schedule'
 
 export const firebaseEnabled = isFirebaseConfigured
 
@@ -199,6 +201,7 @@ export function normalizeCar(id: string, d: Record<string, unknown>): Car {
     color: p.color ?? '',
     plate: p.plate ?? '',
     photoUrl: p.photoUrl ?? null,
+    phaseId: (p.phaseId as string | null) ?? null,
     createdAt: p.createdAt ?? Date.now(),
   }
 }
@@ -261,6 +264,7 @@ export function normalizeWash(id: string, d: Record<string, unknown>): WashReque
     doneAt: p.doneAt ?? null,
     doneBy: p.doneBy ?? null,
     doneByPhone: p.doneByPhone ?? null,
+    photoUrl: p.photoUrl ?? null,
   }
 }
 
@@ -281,6 +285,7 @@ export function normalizeCompound(id: string, d: Record<string, unknown>): Compo
     id,
     name: p.name ?? '',
     scheduleNote: p.scheduleNote ?? '',
+    phases: Array.isArray(p.phases) ? (p.phases as Phase[]) : [],
     createdAt: p.createdAt ?? Date.now(),
   }
 }
@@ -387,53 +392,89 @@ export function newDocId(collectionName: string): string | null {
   return doc(collection(db, collectionName)).id
 }
 
+/** بداية النهاردة (00:00) — لفحص "اتغسلت النهاردة قبل كده؟" محلياً. */
+function startOfToday(): number {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
 /**
- * إتمام غسلة — العملية الحرجة في التطبيق:
- * 1) يقرأ طلب الغسلة — لازم يكون لسه 'requested' (وإلا يرجع خطأ: اتعملت قبل كده).
- * 2) يقرأ الاشتراك — لازم يكون 'active' ورصيده > 0 (وإلا يرجع خطأ).
- * 3) يعلّم الطلب 'done' + ينقص رصيد الاشتراك 1 بالظبط.
+ * تسجيل غسلة منجزة من جدول المراحل (v6) — العملية الحرجة في التطبيق:
+ * العامل/الأدمن بيعلّم عربية "تم الغسيل" من قائمة النهاردة، من غير طلب
+ * مسبق من العميل. الحماية داخل الدالة نفسها (مش في الواجهة بس):
+ * 1) يقرأ الاشتراك من السيرفر — لازم يكون 'active' ولسه في الشهر.
+ * 2) يتأكد إن العربية متغسلتش النهاردة قبل كده — يقرأ سجل الغسلات
+ *    ويصفّي محلياً (بدون فهرس مركّب).
+ * 3) ينشئ مستند washRequests بحالة 'done' (requestedAt = doneAt = وقت
+ *    التنفيذ، مع صورة الغسلة لو اتبعتت).
+ * مفيش عدّاد غسلات: الرصيد شهري — العربية بتتغسل في أيام مرحلتها
+ * طول الشهر، والاشتراك بينتهي آخر الشهر. الدالة دي مبتلمسش الاشتراك
+ * خالص ولا بتنقّص أي رصيد.
  * زرار "تم الغسيل" بيتقفل أثناء التنفيذ (حماية إضافية من الضغطة المزدوجة).
  */
-export async function completeWash(
-  washId: string,
+export async function recordWashDone(
+  entry: TodayCar,
   doneBy: string,
   doneByPhone: string,
+  photoUrl?: string | null,
 ): Promise<{ ok: boolean; message: string }> {
   const db = getDb()
   if (!db) return { ok: false, message: 'Firebase غير مربوط — اربط مشروع top-service الأول.' }
   try {
-    const washSnap = await getDoc(doc(db, 'washRequests', washId))
-    if (!washSnap.exists()) return { ok: false, message: 'طلب الغسلة ده مش موجود.' }
-    const wash = normalizeWash(washId, washSnap.data() as Record<string, unknown>)
-    if (wash.status !== 'requested') {
-      return { ok: false, message: 'الغسلة دي اتعملت قبل كده (أو اتلغت) — الرصيد متنقصش تاني.' }
-    }
-    const subSnap = await getDoc(doc(db, 'subscriptions', wash.subscriptionId))
-    if (!subSnap.exists()) return { ok: false, message: 'اشتراك العربية ده مش موجود.' }
-    const sub = normalizeSubscription(wash.subscriptionId, subSnap.data() as Record<string, unknown>)
-    if (sub.status !== 'active') {
-      return { ok: false, message: 'اشتراك العربية مش نشط — مينفعش نتمم الغسلة.' }
-    }
-    if (sub.washesRemaining <= 0) {
-      return { ok: false, message: 'رصيد الغسلات خلص — العميل لازم يجدّد اشتراكه الأول.' }
-    }
-    if (Date.now() > sub.endDate) {
-      return { ok: false, message: 'الاشتراك انتهى بنهاية الشهر — الغسلات المتبقية راحت.' }
-    }
     const now = Date.now()
-    await updateDoc(doc(db, 'washRequests', washId), {
+    const subSnap = await getDoc(doc(db, 'subscriptions', entry.sub.id))
+    if (!subSnap.exists()) return { ok: false, message: 'اشتراك العربية ده مش موجود.' }
+    const sub = normalizeSubscription(
+      entry.sub.id,
+      subSnap.data() as Record<string, unknown>,
+    )
+    if (sub.status !== 'active') {
+      return { ok: false, message: 'اشتراك العربية مش نشط — مينفعش نسجّل الغسلة.' }
+    }
+    if (now > sub.endDate) {
+      return { ok: false, message: 'الاشتراك انتهى بنهاية الشهر.' }
+    }
+    // اتغسلت النهاردة قبل كده؟ نقرأ كل الطلبات ونصفّي محلياً — بدون فهرس مركّب
+    const rows = await loadCollection('washRequests')
+    const start = startOfToday()
+    const alreadyDone = rows.some(
+      (r) =>
+        r.carId === entry.car.id && r.status === 'done' && Number(r.doneAt ?? 0) >= start,
+    )
+    if (alreadyDone) {
+      return { ok: false, message: 'العربية دي اتغسلت النهاردة خلاص.' }
+    }
+    const id = newDocId('washRequests')
+    if (!id) return { ok: false, message: 'Firebase غير مربوط.' }
+    const { car, customer, compound } = entry
+    const ok = await saveDoc('washRequests', id, {
+      id,
+      carId: car.id,
+      customerPhone: customer.phone,
+      customerName: customer.name,
+      carPlate: car.plate,
+      carType: car.type,
+      carColor: car.color,
+      compoundId: compound.id,
+      compoundName: compound.name,
+      building: customer.building,
+      apartment: customer.apartment,
+      subscriptionId: sub.id,
       status: 'done',
+      requestedAt: now,
       doneAt: now,
       doneBy,
       doneByPhone,
+      photoUrl: photoUrl ?? null,
     })
-    await updateDoc(doc(db, 'subscriptions', wash.subscriptionId), {
-      washesRemaining: sub.washesRemaining - 1,
-    })
-    return { ok: true, message: `تم الغسيل — متبقي ${sub.washesRemaining - 1} غسلات للعربية.` }
+    if (!ok) {
+      return { ok: false, message: 'مقدرناش نسجّل الغسلة — تأكد إن النت شغال وحاول تاني.' }
+    }
+    return { ok: true, message: `تم الغسيل ✅ — العربية ${car.plate}.` }
   } catch (e) {
-    reportError('إتمام الغسلة', e)
-    return { ok: false, message: 'حصلت مشكلة أثناء حفظ إتمام الغسلة — حاول تاني.' }
+    reportError('تسجيل الغسلة', e)
+    return { ok: false, message: 'حصلت مشكلة أثناء حفظ الغسلة — حاول تاني.' }
   }
 }
 
