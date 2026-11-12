@@ -1322,7 +1322,7 @@ function CustomerView({
                     <p className="muted">خطوة {wizStep} من 3</p>
                     {wizStep === 1 && (
                       <>
-                        <label>اختار الكومباوند</label>
+                        <label>انت ساكن فين؟</label>
                         {compounds.length === 0 && (
                           <p className="muted">
                             لسه مفيش كومباوندات — كلم الشركة على {COMPANY_PHONE}.
