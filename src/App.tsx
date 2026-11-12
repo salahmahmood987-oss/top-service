@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v3)
+//  Top Service — المرحلة 1 (v4)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات + طلب غسلة + عدّاد رصيد + لوحة أدمن + تأكيد دفع يدوي.
@@ -16,6 +16,7 @@ import { isFirebaseConfigured } from './firebaseConfig'
 import {
   approvePayment,
   completeWash,
+  deleteDocById,
   getLastFirestoreError,
   loadAllCars,
   loadAllCustomers,
@@ -476,7 +477,7 @@ export default function App() {
           <span className="brand">Top Service</span>
         </h1>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 3 — المرحلة 1</span>
+        <span className="badge">الإصدار 4 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -657,7 +658,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 3</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 4</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -1628,6 +1629,24 @@ function AdminView({
   const [newWasherName, setNewWasherName] = useState('')
   const [newWasherPhone, setNewWasherPhone] = useState('')
   const [newWasherCompounds, setNewWasherCompounds] = useState<string[]>([])
+  // تعديل: كومباوند
+  const [editingCompoundId, setEditingCompoundId] = useState<string | null>(null)
+  const [editCompoundName, setEditCompoundName] = useState('')
+  const [editCompoundSchedule, setEditCompoundSchedule] = useState('')
+  // تعديل: عامل غسيل
+  const [editingWasherPhone, setEditingWasherPhone] = useState<string | null>(null)
+  const [editWasherName, setEditWasherName] = useState('')
+  const [editWasherPhone, setEditWasherPhone] = useState('')
+  const [editWasherCompounds, setEditWasherCompounds] = useState<string[]>([])
+  const [editWasherActive, setEditWasherActive] = useState(true)
+  // تعديل: عميل (رقم الموبايل مبيتغيرش — مربوط بالعربيات والاشتراكات)
+  const [editingCustomerPhone, setEditingCustomerPhone] = useState<string | null>(null)
+  const [editCustomerName, setEditCustomerName] = useState('')
+  const [editCustomerCompound, setEditCustomerCompound] = useState('')
+  const [editCustomerBuilding, setEditCustomerBuilding] = useState('')
+  const [editCustomerApartment, setEditCustomerApartment] = useState('')
+  // تأكيد حذف — ضغطتين: الأولى تجهّز، التانية تنفّذ
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   const loadAll = async () => {
     const [cs, cars, ss, ps, ws, reqs] = await Promise.all([
@@ -1832,6 +1851,190 @@ function AdminView({
     )
   }
 
+  // ---- تعديل / حذف كومباوند ----
+  function startEditCompound(c: Compound) {
+    setEditingCompoundId(c.id)
+    setEditCompoundName(c.name)
+    setEditCompoundSchedule(c.scheduleNote)
+    setConfirmDeleteId(null)
+  }
+
+  async function saveEditCompound(e: FormEvent) {
+    e.preventDefault()
+    if (!editingCompoundId) return
+    if (!editCompoundName.trim()) {
+      onNotice('اكتب اسم الكومباوند.')
+      return
+    }
+    setBusyId(`edit-compound:${editingCompoundId}`)
+    const ok = await saveDoc('compounds', editingCompoundId, {
+      name: editCompoundName.trim(),
+      scheduleNote: editCompoundSchedule.trim(),
+    })
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ التعديل — حاول تاني.')
+      return
+    }
+    setEditingCompoundId(null)
+    const list = await loadCompounds()
+    onCompounds(list)
+    onNotice(`تم تعديل كومباوند ${editCompoundName.trim()} ✅`)
+  }
+
+  async function deleteCompound(c: Compound) {
+    const key = `compound:${c.id}`
+    if (confirmDeleteId !== key) {
+      setConfirmDeleteId(key)
+      return
+    }
+    setConfirmDeleteId(null)
+    setBusyId(key)
+    // نشيل الكومباوند من قوائم عمال الغسيل المربوطين بيه
+    const linked = washers.filter((w) => w.compoundIds.includes(c.id))
+    await Promise.all(
+      linked.map((w) =>
+        saveDoc('washers', w.phone, {
+          compoundIds: w.compoundIds.filter((id) => id !== c.id),
+        }),
+      ),
+    )
+    const ok = await deleteDocById('compounds', c.id)
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحذف الكومباوند — حاول تاني.')
+      return
+    }
+    const list = await loadCompounds()
+    onCompounds(list)
+    await loadAll()
+    onNotice(`تم حذف كومباوند ${c.name}.`)
+  }
+
+  // ---- تعديل / حذف / إيقاف عامل غسيل ----
+  function startEditWasher(w: Washer) {
+    setEditingWasherPhone(w.phone)
+    setEditWasherName(w.name)
+    setEditWasherPhone(w.phone)
+    setEditWasherCompounds([...w.compoundIds])
+    setEditWasherActive(w.active)
+    setConfirmDeleteId(null)
+  }
+
+  function toggleEditWasherCompound(id: string) {
+    setEditWasherCompounds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    )
+  }
+
+  async function saveEditWasher(e: FormEvent) {
+    e.preventDefault()
+    if (!editingWasherPhone) return
+    if (editWasherName.trim().length < 2) {
+      onNotice('اكتب اسم عامل الغسيل.')
+      return
+    }
+    const e164 = toE164Phone(editWasherPhone)
+    if (!e164) {
+      onNotice('رقم موبايل عامل الغسيل غير صحيح — اكتب رقم مصري 11 رقم يبدأ بـ 01.')
+      return
+    }
+    setBusyId(`edit-washer:${editingWasherPhone}`)
+    const ok = await saveDoc('washers', e164, {
+      phone: e164,
+      name: editWasherName.trim(),
+      compoundIds: editWasherCompounds,
+      active: editWasherActive,
+    })
+    if (!ok) {
+      setBusyId(null)
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ التعديل — حاول تاني.')
+      return
+    }
+    if (e164 !== editingWasherPhone) {
+      // الرقم اتغيّر: المستند القديم بيتمسح والجديد هو اللي بيفضل
+      await deleteDocById('washers', editingWasherPhone)
+    }
+    setBusyId(null)
+    setEditingWasherPhone(null)
+    await loadAll()
+    onNotice(`تم تعديل بيانات عامل الغسيل ${editWasherName.trim()} ✅`)
+  }
+
+  async function deleteWasher(w: Washer) {
+    const key = `washer:${w.phone}`
+    if (confirmDeleteId !== key) {
+      setConfirmDeleteId(key)
+      return
+    }
+    setConfirmDeleteId(null)
+    setBusyId(key)
+    const ok = await deleteDocById('washers', w.phone)
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحذف عامل الغسيل — حاول تاني.')
+      return
+    }
+    await loadAll()
+    onNotice(`تم حذف عامل الغسيل ${w.name}.`)
+  }
+
+  async function toggleWasherActive(w: Washer) {
+    setBusyId(`toggle-washer:${w.phone}`)
+    const ok = await saveDoc('washers', w.phone, { active: !w.active })
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نغيّر حالة عامل الغسيل — حاول تاني.')
+      return
+    }
+    await loadAll()
+    onNotice(
+      w.active
+        ? `تم إيقاف ${w.name} مؤقتاً — مش هيشوف طلبات جديدة.`
+        : `تم تفعيل ${w.name} تاني ✅`,
+    )
+  }
+
+  // ---- تعديل عميل ----
+  function startEditCustomer(c: Customer) {
+    setEditingCustomerPhone(c.phone)
+    setEditCustomerName(c.name)
+    setEditCustomerCompound(c.compoundName)
+    setEditCustomerBuilding(c.building)
+    setEditCustomerApartment(c.apartment)
+    setConfirmDeleteId(null)
+  }
+
+  async function saveEditCustomer(e: FormEvent) {
+    e.preventDefault()
+    if (!editingCustomerPhone) return
+    if (editCustomerName.trim().length < 2) {
+      onNotice('اكتب اسم العميل.')
+      return
+    }
+    if (!editCustomerCompound.trim()) {
+      onNotice('اختار الكومباوند.')
+      return
+    }
+    setBusyId(`edit-customer:${editingCustomerPhone}`)
+    const compoundId =
+      compounds.find((x) => x.name === editCustomerCompound.trim())?.id ?? 'manual'
+    const ok = await saveDoc('customers', editingCustomerPhone, {
+      name: editCustomerName.trim(),
+      compoundName: editCustomerCompound.trim(),
+      compoundId,
+      building: editCustomerBuilding.trim(),
+      apartment: editCustomerApartment.trim(),
+    })
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ التعديل — حاول تاني.')
+      return
+    }
+    setEditingCustomerPhone(null)
+    onNotice(`تم تعديل بيانات ${editCustomerName.trim()} ✅`)
+  }
+
   if (loading) {
     return (
       <div className="card">
@@ -1968,6 +2171,63 @@ function AdminView({
                     </div>
                   )
                 })}
+                {editingCustomerPhone === c.phone ? (
+                  <form onSubmit={(e) => void saveEditCustomer(e)} style={{ marginTop: 10 }}>
+                    <label>اسم العميل</label>
+                    <input
+                      type="text"
+                      value={editCustomerName}
+                      onChange={(e) => setEditCustomerName(e.target.value)}
+                    />
+                    <label>الكومباوند</label>
+                    <select
+                      value={editCustomerCompound}
+                      onChange={(e) => setEditCustomerCompound(e.target.value)}
+                    >
+                      {compounds.map((x) => (
+                        <option key={x.id} value={x.name}>
+                          {x.name}
+                        </option>
+                      ))}
+                      {!compounds.some((x) => x.name === editCustomerCompound) && (
+                        <option value={editCustomerCompound}>{editCustomerCompound}</option>
+                      )}
+                    </select>
+                    <label>عمارة</label>
+                    <input
+                      type="text"
+                      value={editCustomerBuilding}
+                      onChange={(e) => setEditCustomerBuilding(e.target.value)}
+                    />
+                    <label>شقة</label>
+                    <input
+                      type="text"
+                      value={editCustomerApartment}
+                      onChange={(e) => setEditCustomerApartment(e.target.value)}
+                    />
+                    <div className="row">
+                      <button
+                        className="btn small active"
+                        type="submit"
+                        disabled={busyId === `edit-customer:${c.phone}`}
+                      >
+                        {busyId === `edit-customer:${c.phone}` ? 'بيحفظ…' : 'حفظ التعديل'}
+                      </button>
+                      <button
+                        className="btn small"
+                        type="button"
+                        onClick={() => setEditingCustomerPhone(null)}
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                    <p className="muted">رقم الموبايل مبيتغيرش من هنا (مربوط بالعربيات والاشتراكات).</p>
+                  </form>
+                ) : (
+                  <button className="btn small" onClick={() => startEditCustomer(c)}>
+                    ✏️ تعديل البيانات
+                  </button>
+                )}
               </div>
             )
           })}
@@ -2086,6 +2346,51 @@ function AdminView({
                   <BuildingIcon /> {c.name}
                 </b>
                 {c.scheduleNote && <div className="muted">الجدول: {c.scheduleNote}</div>}
+                {editingCompoundId === c.id ? (
+                  <form onSubmit={(e) => void saveEditCompound(e)} style={{ marginTop: 10 }}>
+                    <label>اسم الكومباوند</label>
+                    <input
+                      type="text"
+                      value={editCompoundName}
+                      onChange={(e) => setEditCompoundName(e.target.value)}
+                    />
+                    <label>جدول الغسيل الثابت (اختياري)</label>
+                    <input
+                      type="text"
+                      value={editCompoundSchedule}
+                      onChange={(e) => setEditCompoundSchedule(e.target.value)}
+                    />
+                    <div className="row">
+                      <button
+                        className="btn small active"
+                        type="submit"
+                        disabled={busyId === `edit-compound:${c.id}`}
+                      >
+                        {busyId === `edit-compound:${c.id}` ? 'بيحفظ…' : 'حفظ التعديل'}
+                      </button>
+                      <button
+                        className="btn small"
+                        type="button"
+                        onClick={() => setEditingCompoundId(null)}
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="row">
+                    <button className="btn small" onClick={() => startEditCompound(c)}>
+                      ✏️ تعديل
+                    </button>
+                    <button
+                      className="btn small danger"
+                      onClick={() => void deleteCompound(c)}
+                      disabled={busyId === `compound:${c.id}`}
+                    >
+                      {confirmDeleteId === `compound:${c.id}` ? 'تأكيد الحذف؟' : '🗑️ حذف'}
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
             <form onSubmit={(e) => void addCompound(e)}>
@@ -2124,6 +2429,87 @@ function AdminView({
                         .join('، ')}`
                     : 'مش مربوط بكومباوندات بعد'}
                 </div>
+                {!w.active && (
+                  <div className="muted" style={{ color: '#b91c1c' }}>
+                    ⏸️ موقوف مؤقتاً
+                  </div>
+                )}
+                {editingWasherPhone === w.phone ? (
+                  <form onSubmit={(e) => void saveEditWasher(e)} style={{ marginTop: 10 }}>
+                    <label>اسم عامل الغسيل</label>
+                    <input
+                      type="text"
+                      value={editWasherName}
+                      onChange={(e) => setEditWasherName(e.target.value)}
+                    />
+                    <label>رقم موبايل عامل الغسيل</label>
+                    <input
+                      type="tel"
+                      value={editWasherPhone}
+                      onChange={(e) => setEditWasherPhone(e.target.value)}
+                      dir="ltr"
+                      style={{ textAlign: 'center' }}
+                    />
+                    <label>الكومباوندات اللي هيشتغل فيها</label>
+                    {compounds.map((c) => (
+                      <label
+                        key={c.id}
+                        style={{ display: 'flex', gap: 8, alignItems: 'center', fontWeight: 600 }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={editWasherCompounds.includes(c.id)}
+                          onChange={() => toggleEditWasherCompound(c.id)}
+                        />
+                        {c.name}
+                      </label>
+                    ))}
+                    <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontWeight: 600 }}>
+                      <input
+                        type="checkbox"
+                        checked={editWasherActive}
+                        onChange={(e) => setEditWasherActive(e.target.checked)}
+                      />
+                      فعّال (يشوف طلبات جديدة)
+                    </label>
+                    <div className="row">
+                      <button
+                        className="btn small active"
+                        type="submit"
+                        disabled={busyId === `edit-washer:${w.phone}`}
+                      >
+                        {busyId === `edit-washer:${w.phone}` ? 'بيحفظ…' : 'حفظ التعديل'}
+                      </button>
+                      <button
+                        className="btn small"
+                        type="button"
+                        onClick={() => setEditingWasherPhone(null)}
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="row">
+                    <button className="btn small" onClick={() => startEditWasher(w)}>
+                      ✏️ تعديل
+                    </button>
+                    <button
+                      className="btn small"
+                      onClick={() => void toggleWasherActive(w)}
+                      disabled={busyId === `toggle-washer:${w.phone}`}
+                    >
+                      {w.active ? '⏸️ إيقاف' : '▶️ تفعيل'}
+                    </button>
+                    <button
+                      className="btn small danger"
+                      onClick={() => void deleteWasher(w)}
+                      disabled={busyId === `washer:${w.phone}`}
+                    >
+                      {confirmDeleteId === `washer:${w.phone}` ? 'تأكيد الحذف؟' : '🗑️ حذف'}
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
             <form onSubmit={(e) => void addWasher(e)}>

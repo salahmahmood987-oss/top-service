@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 import {
   collection,
+  deleteDoc as deleteFirestoreDoc,
   doc,
   getDoc,
   getDocs,
@@ -110,6 +111,19 @@ export async function saveDoc(
     return true
   } catch (e) {
     reportError('حفظ', e)
+    return false
+  }
+}
+
+/** يحذف مستنداً — false لو مفيش إعداد أو فشل الحذف. */
+export async function deleteDocById(collectionName: string, id: string): Promise<boolean> {
+  try {
+    const db = getDb()
+    if (!db) return false
+    await deleteFirestoreDoc(doc(db, collectionName, id))
+    return true
+  } catch (e) {
+    reportError('حذف', e)
     return false
   }
 }
