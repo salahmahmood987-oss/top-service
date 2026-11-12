@@ -81,7 +81,7 @@ export interface Subscription {
   approvedAt: number | null
 }
 
-export type PaymentStatus = 'pending' | 'approved' | 'rejected'
+export type PaymentStatus = 'pending' | 'due' | 'approved' | 'rejected'
 export type PaymentMethod = 'cash' | 'visa' | 'wallet'
 
 export interface Payment {
@@ -137,6 +137,11 @@ export interface Compound {
   /** ملاحظة جدول الشركة الثابت للكومباوند، مثال: "السبت والثلاثاء" */
   scheduleNote: string
   createdAt: number
+}
+
+/** هل نافذة التحصيل مفتوحة؟ التحصيل المؤخر يبدأ من يوم 25 من الشهر. */
+export function isCollectionOpen(now = Date.now()): boolean {
+  return new Date(now).getDate() >= 25
 }
 
 /** آخر يوم في الشهر الحالي (23:59:59) — نهاية الاشتراك الشهري. */

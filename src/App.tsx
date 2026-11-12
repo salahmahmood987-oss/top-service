@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v4)
+//  Top Service — المرحلة 1 (v5)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات + طلب غسلة + عدّاد رصيد + لوحة أدمن + تأكيد دفع يدوي.
@@ -16,6 +16,7 @@ import { isFirebaseConfigured } from './firebaseConfig'
 import {
   approvePayment,
   completeWash,
+  confirmCollection,
   deleteDocById,
   getLastFirestoreError,
   loadAllCars,
@@ -52,6 +53,7 @@ import {
   PACKAGES,
   fmtDate,
   fmtDateTime,
+  isCollectionOpen,
   isSubscriptionActive,
   monthEndTimestamp,
   packageById,
@@ -477,7 +479,7 @@ export default function App() {
           <span className="brand">Top Service</span>
         </h1>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 4 — المرحلة 1</span>
+        <span className="badge">الإصدار 5 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -658,7 +660,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 4</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 5</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -766,8 +768,12 @@ function CustomerView({
   function activeSubFor(carId: string): Subscription | undefined {
     return subs.find((s) => s.carId === carId && isSubscriptionActive(s))
   }
-  function pendingSubFor(carId: string): Subscription | undefined {
-    return subs.find((s) => s.carId === carId && s.status === 'pending_payment')
+  /** دفعة مستحقة (تحصيل مؤخر) أو محصّلة لاشتراك معيّن. */
+  function duePaymentFor(subId: string): Payment | undefined {
+    return payments.find((p) => p.subscriptionId === subId && p.status === 'due')
+  }
+  function paidPaymentFor(subId: string): Payment | undefined {
+    return payments.find((p) => p.subscriptionId === subId && p.status === 'approved')
   }
   function openRequestFor(carId: string): WashRequest | undefined {
     return history.find((w) => w.carId === carId && w.status === 'requested')
@@ -823,10 +829,6 @@ function CustomerView({
       onNotice(`العربية دي عندها اشتراك نشط — متبقي ${active.washesRemaining} غسلات حتى ${fmtDate(active.endDate)}. استخدمهم الأول، وبعدها جدّد.`)
       return
     }
-    if (pendingSubFor(car.id)) {
-      onNotice('في اشتراك بانتظار تأكيد الدفع للعربية دي — استنى موافقة الأدمن.')
-      return
-    }
     if (!isFirebaseConfigured) {
       onNotice('Firebase غير مربوط — مينفعش نسجّل الاشتراك. اربط مشروع top-service الأول.')
       return
@@ -850,11 +852,11 @@ function CustomerView({
       price: pkg.price,
       washesTotal: pkg.washes,
       washesRemaining: pkg.washes,
-      status: 'pending_payment',
-      startDate: 0,
+      status: 'active',
+      startDate: now,
       endDate: monthEndTimestamp(now),
       createdAt: now,
-      approvedAt: null,
+      approvedAt: now,
     })
     const okPay = okSub
       ? await saveDoc('payments', payId, {
@@ -865,7 +867,7 @@ function CustomerView({
           carPlate: car.plate,
           amount: pkg.price,
           method: subMethod,
-          status: 'pending',
+          status: 'due',
           receiptNo: null,
           createdAt: now,
           decidedAt: null,
@@ -879,7 +881,7 @@ function CustomerView({
     setSubCarId(null)
     await loadAll()
     onNotice(
-      `تم تسجيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} — بانتظار تأكيد الدفع من الإدارة، وبعد الموافقة الاشتراك يبقى نشط لآخر الشهر.`,
+      `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — تقدر تطلب غسلة من دلوقتي. المستحق ${pkg.price} جنيه، والتحصيل من يوم 25.`,
     )
   }
 
@@ -1008,7 +1010,8 @@ function CustomerView({
           )}
           {cars.map((car) => {
             const active = activeSubFor(car.id)
-            const pending = pendingSubFor(car.id)
+            const duePay = active ? duePaymentFor(active.id) : undefined
+            const paidPay = active ? paidPaymentFor(active.id) : undefined
             const open = openRequestFor(car.id)
             const expired = subs.find(
               (s) => s.carId === car.id && s.status === 'active' && !isSubscriptionActive(s),
@@ -1024,8 +1027,7 @@ function CustomerView({
                     <div className="muted">لوحة: {car.plate}</div>
                   </div>
                   {active && <span className="order-badge green">نشط</span>}
-                  {pending && <span className="order-badge">بانتظار الدفع</span>}
-                  {!active && !pending && <span className="order-badge gray">بدون اشتراك</span>}
+                  {!active && <span className="order-badge gray">بدون اشتراك</span>}
                 </div>
                 {active && (
                   <div className="balance-wrap" style={{ marginTop: 12 }}>
@@ -1040,6 +1042,16 @@ function CustomerView({
                       <div className="muted">
                         باقة {active.washesTotal} غسلات — {active.price} جنيه / شهر
                       </div>
+                      {duePay && (
+                        <div className="muted" style={{ marginTop: 6 }}>
+                          المستحق: {duePay.amount} جنيه — التحصيل من يوم 25
+                        </div>
+                      )}
+                      {paidPay && (
+                        <div className="muted" style={{ marginTop: 6 }}>
+                          تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}
+                        </div>
+                      )}
                       {active.washesRemaining <= 2 && (
                         <div className="warn" style={{ marginTop: 8 }}>
                           ⚠️ الرصيد قرب يخلص — جدّد اشتراكك قبل ما ينتهي.
@@ -1056,13 +1068,7 @@ function CustomerView({
                     </div>
                   </div>
                 )}
-                {pending && (
-                  <p className="muted" style={{ marginTop: 10 }}>
-                    اشتراك باقة {pending.washesTotal} غسلات ({pending.price} جنيه) بانتظار تأكيد
-                    الدفع من الإدارة.
-                  </p>
-                )}
-                {!active && !pending && (
+                {!active && (
                   <p className="muted" style={{ marginTop: 10 }}>
                     {expired
                       ? 'الاشتراك السابق انتهى (خلص الشهر أو خلص الرصيد) — جدّد عشان تكمل.'
@@ -1096,7 +1102,7 @@ function CustomerView({
                     )}
                   </>
                 )}
-                {(!active || active.washesRemaining <= 0) && !pending && (
+                {(!active || active.washesRemaining <= 0) && (
                   <button className="btn big plum" onClick={() => setTab('packages')}>
                     <RefreshIcon /> تجديد الاشتراك
                   </button>
@@ -1195,10 +1201,9 @@ function CustomerView({
           {cars.length === 0 && <p className="muted">ضيف عربية الأول من تبويب "عربياتي".</p>}
           {cars.map((car) => {
             const active = activeSubFor(car.id)
-            const pending = pendingSubFor(car.id)
-            const past = subs
-              .filter((s) => s.carId === car.id && s.status !== 'pending_payment')
-              .slice(0, 3)
+            const duePay = active ? duePaymentFor(active.id) : undefined
+            const paidPay = active ? paidPaymentFor(active.id) : undefined
+            const past = subs.filter((s) => s.carId === car.id).slice(0, 3)
             return (
               <div className="ride" key={car.id}>
                 <b>
@@ -1210,13 +1215,15 @@ function CustomerView({
                     {active.washesRemaining} حتى {fmtDate(active.endDate)}
                   </p>
                 )}
-                {pending && (
+                {active && duePay && (
                   <p className="muted">
-                    ⏳ باقة {pending.washesTotal} غسلات ({pending.price} جنيه) بانتظار تأكيد
-                    الدفع من الإدارة.
+                    المستحق: {duePay.amount} جنيه — التحصيل من يوم 25
                   </p>
                 )}
-                {!active && !pending && past.length > 0 && (
+                {active && paidPay && (
+                  <p className="muted">تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}</p>
+                )}
+                {!active && past.length > 0 && (
                   <p className="muted">آخر اشتراك: باقة {past[0].washesTotal} — {past[0].status === 'active' ? 'انتهى' : past[0].status === 'rejected' ? 'اترفض الدفع' : past[0].status}.</p>
                 )}
                 <button
@@ -1226,7 +1233,7 @@ function CustomerView({
                     setSubPkg(4)
                     setSubMethod('cash')
                   }}
-                  disabled={!!pending || (!!active && active.washesRemaining > 0)}
+                  disabled={!!active && active.washesRemaining > 0}
                 >
                   {subCarId === car.id ? 'إلغاء الاختيار' : 'اشترك / جدّد'}
                 </button>
@@ -1248,12 +1255,12 @@ function CustomerView({
                         </div>
                       </div>
                     ))}
-                    <label>طريقة الدفع (تأكيد يدوي من الإدارة في المرحلة 1)</label>
+                    <label>طريقة الدفع (التحصيل من يوم 25)</label>
                     <select
                       value={subMethod}
                       onChange={(e) => setSubMethod(e.target.value as PaymentMethod)}
                     >
-                      <option value="cash">نقدي (يؤكده الأدمن)</option>
+                      <option value="cash">نقدي (تحصيل عند الباب)</option>
                       <option value="visa">فيزا</option>
                       <option value="wallet">محفظة إلكترونية</option>
                     </select>
@@ -1272,7 +1279,10 @@ function CustomerView({
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <b>{p.amount} جنيه — {p.carPlate}</b>
                 {p.status === 'pending' && <span className="order-badge">بانتظار التأكيد</span>}
-                {p.status === 'approved' && <span className="order-badge green">تم التأكيد</span>}
+                {p.status === 'due' && (
+                  <span className="order-badge">مستحق — التحصيل من يوم 25</span>
+                )}
+                {p.status === 'approved' && <span className="order-badge green">تم التحصيل ✅</span>}
                 {p.status === 'rejected' && <span className="order-badge red">مرفوضة</span>}
               </div>
               <div className="muted">
@@ -1766,6 +1776,20 @@ function AdminView({
     onNotice(r.message)
   }
 
+  /** تأكيد تحصيل دفعة مستحقة — يلمس الدفعة بس، الاشتراك مبيتلمسش. */
+  async function collectPayment(p: Payment) {
+    if (payBusy) return
+    setPayBusy(p.id)
+    const r = await confirmCollection(p.id)
+    setPayBusy(null)
+    if (!r.ok) {
+      onNotice(r.message)
+      return
+    }
+    await loadAll()
+    onNotice(r.message)
+  }
+
   async function markDone(w: WashRequest) {
     if (busyId) return
     setBusyId(w.id)
@@ -2043,8 +2067,10 @@ function AdminView({
     )
   }
 
+  const duePayments = payments.filter((p) => p.status === 'due')
   const pendingPayments = payments.filter((p) => p.status === 'pending')
-  const receipts = payments.filter((p) => p.status !== 'pending')
+  const receipts = payments.filter((p) => p.status === 'approved' || p.status === 'rejected')
+  const totalDue = duePayments.reduce((sum, p) => sum + p.amount, 0)
 
   return (
     <>
@@ -2062,7 +2088,7 @@ function AdminView({
           className={`tab${tab === 'payments' ? ' active' : ''}`}
           onClick={() => setTab('payments')}
         >
-          <ReceiptIcon /> المدفوعات
+          <ReceiptIcon /> التحصيل
         </button>
         <button className={`tab${tab === 'today' ? ' active' : ''}`} onClick={() => setTab('today')}>
           <DropIcon /> غسلات اليوم
@@ -2100,13 +2126,14 @@ function AdminView({
               <div className="k">غسلات متبقية إجمالي</div>
             </div>
             <div className="stat">
-              <div className="v">{pendingPayments.length}</div>
-              <div className="k">مدفوعات بانتظار التأكيد</div>
+              <div className="v">{duePayments.length}</div>
+              <div className="k">مستحقات للتحصيل</div>
             </div>
           </div>
-          {pendingPayments.length > 0 && (
+          {duePayments.length > 0 && (
             <button className="btn big" onClick={() => setTab('payments')}>
-              <ReceiptIcon /> في {pendingPayments.length} دفعة بانتظار تأكيدك — راجعهم
+              <ReceiptIcon /> في {duePayments.length} مستحق للتحصيل بإجمالي {totalDue} جنيه —
+              راجعهم
             </button>
           )}
           <button className="btn big" onClick={onSwitchToCustomer}>
@@ -2153,9 +2180,12 @@ function AdminView({
                   const active = subsOf.find(
                     (s) => s.carId === car.id && isSubscriptionActive(s),
                   )
-                  const pending = subsOf.find(
-                    (s) => s.carId === car.id && s.status === 'pending_payment',
-                  )
+                  const latestSub = subsOf.find((s) => s.carId === car.id)
+                  const duePay = latestSub
+                    ? payments.find(
+                        (p) => p.subscriptionId === latestSub.id && p.status === 'due',
+                      )
+                    : undefined
                   return (
                     <div key={car.id} className="muted" style={{ marginTop: 6 }}>
                       🚗 {car.type} — {car.plate} —{' '}
@@ -2163,8 +2193,10 @@ function AdminView({
                         <b style={{ color: '#15803d' }}>
                           نشط: متبقي {active.washesRemaining} حتى {fmtDate(active.endDate)}
                         </b>
-                      ) : pending ? (
-                        <b style={{ color: '#8a3d24' }}>بانتظار تأكيد الدفع</b>
+                      ) : duePay ? (
+                        <b style={{ color: '#8a3d24' }}>
+                          مستحق: {duePay.amount} جنيه — التحصيل من يوم 25
+                        </b>
                       ) : (
                         <span>بدون اشتراك نشط</span>
                       )}
@@ -2236,15 +2268,19 @@ function AdminView({
 
       {tab === 'payments' && (
         <div className="card">
-          <h2>المدفوعات المعلّقة ({pendingPayments.length})</h2>
-          {pendingPayments.length === 0 && <p className="muted">مفيش مدفوعات بانتظار التأكيد.</p>}
-          {pendingPayments.map((p) => (
+          <h2>التحصيل ({duePayments.length})</h2>
+          <p className="muted">
+            التحصيل يبدأ من يوم 25 من الشهر{isCollectionOpen() ? ' — نافذة التحصيل مفتوحة دلوقتي ✅' : ''} — إجمالي
+            المستحق: {totalDue} جنيه.
+          </p>
+          {duePayments.length === 0 && <p className="muted">مفيش مستحقات للتحصيل دلوقتي.</p>}
+          {duePayments.map((p) => (
             <div className="ride" key={p.id}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <b>
                   {p.customerName} — {p.amount} جنيه
                 </b>
-                <span className="order-badge">معلّقة</span>
+                <span className="order-badge">مستحق</span>
               </div>
               <div className="muted">
                 {p.carPlate} — {p.method === 'cash' ? 'نقدي' : p.method === 'visa' ? 'فيزا' : 'محفظة'} —{' '}
@@ -2253,21 +2289,49 @@ function AdminView({
               <div className="row">
                 <button
                   className="btn small active"
-                  onClick={() => void decidePayment(p, true)}
+                  onClick={() => void collectPayment(p)}
                   disabled={payBusy === p.id}
                 >
-                  <CheckIcon /> تأكيد الدفع
-                </button>
-                <button
-                  className="btn small danger"
-                  onClick={() => void decidePayment(p, false)}
-                  disabled={payBusy === p.id}
-                >
-                  <XIcon /> رفض
+                  <CheckIcon /> {payBusy === p.id ? 'بيحفظ…' : 'تأكيد التحصيل'}
                 </button>
               </div>
             </div>
           ))}
+          {pendingPayments.length > 0 && (
+            <>
+              <h3>مدفوعات قديمة بانتظار التأكيد ({pendingPayments.length})</h3>
+              {pendingPayments.map((p) => (
+                <div className="ride" key={p.id}>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <b>
+                      {p.customerName} — {p.amount} جنيه
+                    </b>
+                    <span className="order-badge">معلّقة</span>
+                  </div>
+                  <div className="muted">
+                    {p.carPlate} — {p.method === 'cash' ? 'نقدي' : p.method === 'visa' ? 'فيزا' : 'محفظة'} —{' '}
+                    {fmtDateTime(p.createdAt)}
+                  </div>
+                  <div className="row">
+                    <button
+                      className="btn small active"
+                      onClick={() => void decidePayment(p, true)}
+                      disabled={payBusy === p.id}
+                    >
+                      <CheckIcon /> تأكيد الدفع
+                    </button>
+                    <button
+                      className="btn small danger"
+                      onClick={() => void decidePayment(p, false)}
+                      disabled={payBusy === p.id}
+                    >
+                      <XIcon /> رفض
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
           <h3>سجل الإيصالات</h3>
           {receipts.length === 0 && <p className="muted">لسه مفيش إيصالات.</p>}
           {receipts.map((p) => (

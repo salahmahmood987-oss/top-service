@@ -509,3 +509,43 @@ export async function rejectPayment(
     return { ok: false, message: 'حصلت مشكلة أثناء رفض الدفع — حاول تاني.' }
   }
 }
+
+/**
+ * تأكيد تحصيل دفعة مستحقة (التحصيل المؤخر):
+ * يلمس مستند الدفعة + عدّاد الإيصالات فقط — الاشتراك مبيتلمسش أبداً
+ * (الاشتراك نشط أصلاً والعميل ممكن يكون استخدم غسلات منه، فأي كتابة
+ * على الاشتراك هنا كانت هترجّع رصيده كامل بالغلط).
+ * الدفعة لازم تكون 'due' — غير كده يرجع خطأ (اتقرر فيها قبل كده).
+ */
+export async function confirmCollection(
+  paymentId: string,
+): Promise<{ ok: boolean; message: string }> {
+  const db = getDb()
+  if (!db) return { ok: false, message: 'Firebase غير مربوط.' }
+  try {
+    const paySnap = await getDoc(doc(db, 'payments', paymentId))
+    if (!paySnap.exists()) return { ok: false, message: 'الدفعة دي مش موجودة.' }
+    const pay = normalizePayment(paymentId, paySnap.data() as Record<string, unknown>)
+    if (pay.status !== 'due') {
+      return { ok: false, message: 'الدفعة دي اتقرر فيها قبل كده.' }
+    }
+    // رقم إيصال متسلسل
+    const counterRef = doc(db, 'settings', 'counters')
+    await setDoc(counterRef, { paymentSeq: increment(1) }, { merge: true })
+    const counterSnap = await getDoc(counterRef)
+    const seq = Number(
+      (counterSnap.data() as Record<string, unknown> | undefined)?.paymentSeq ?? 1000,
+    )
+    const receiptNo = `TS-${seq}`
+    const now = Date.now()
+    await updateDoc(doc(db, 'payments', paymentId), {
+      status: 'approved',
+      receiptNo,
+      decidedAt: now,
+    })
+    return { ok: true, message: `تم تأكيد التحصيل — إيصال رقم ${receiptNo}.` }
+  } catch (e) {
+    reportError('تأكيد التحصيل', e)
+    return { ok: false, message: 'حصلت مشكلة أثناء تأكيد التحصيل — حاول تاني.' }
+  }
+}
