@@ -4,16 +4,28 @@
 // أبداً داخل التطبيق**. لا يوجد كود تجريبي هنا.
 //
 // مساران:
-//   • على أندرويد (تطبيق Capacitor): التحقق **الأصلي** عبر إضافة
+//   • على أندرويد (تطبيق Capacitor): إرسال الكود **أصلي** عبر إضافة
 //     @capacitor-firebase/authentication — بيستخدم Firebase SDK الأصلي
 //     (Play Integrity/SafetyNet)، لأن reCAPTCHA الويب لا يعمل داخل WebView
 //     ويفشل بخطأ auth/invalid-app-credential. يتطلب ملف google-services.json
 //     في android/app/ وتسجيل بصمة SHA-1 لمفتاح debug في الكونسول.
+//   • **الجسر (v3): الكود نفسه بيتأكّد في JS SDK** —
+//     PhoneAuthProvider.credential(verificationId, code) + signInWithCredential —
+//     لأن Firestore بيشتغل من JS SDK، ولو الدخول تم أصلي بس، الـ JS SDK
+//     بيفضل شايف المستخدم "مش مسجّل دخول" (currentUser == null) فكل
+//     قراءة/كتابة بقواعد request.auth != null بتترفض بـ
+//     Missing or insufficient permissions. التحقق الأصلي بيبقى احتياطي
+//     بس لو تأكيد الويب فشل.
 //   • على الويب: signInWithPhoneNumber مع reCAPTCHA مخفي.
 // ---------------------------------------------------------------------------
 import { Capacitor } from '@capacitor/core'
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication'
-import { RecaptchaVerifier, signInWithPhoneNumber } from 'firebase/auth'
+import {
+  PhoneAuthProvider,
+  RecaptchaVerifier,
+  signInWithCredential,
+  signInWithPhoneNumber,
+} from 'firebase/auth'
 import type { ConfirmationResult } from 'firebase/auth'
 import { getFirebaseAuth } from './firebaseApp'
 import { isFirebaseConfigured } from './firebaseConfig'
@@ -272,13 +284,12 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
     }
   }
 
-  // --- أندرويد: تحقق أصلي (Native) عبر إضافة Capacitor Firebase ---
+  // --- أندرويد: إرسال أصلي (Native) عبر إضافة Capacitor Firebase ---
   // في الإضافة v8: signInWithPhoneNumber لا ترجع verificationId مباشرة،
   // بل ترسل أحداث: phoneCodeSent (فيه verificationId) أو
   // phoneVerificationCompleted (تحقق فوري/تلقائي) أو phoneVerificationFailed.
-  // ملحوظة: المسار الأصلي مش محتاج نسخة Auth من JS SDK أصلاً — الإضافة
-  // الأصلية بتتعامل مع Firebase مباشرة، فمش بنستدعي getFirebaseAuth هنا
-  // عشان أي مشكلة في JS SDK ما توقّفش إرسال الكود.
+  // الكود نفسه بيتأكّد بعدين في JS SDK (انظر verifyOtpCode) — ده الجسر
+  // اللي بيخلي Firestore يشوف المستخدم مسجّل دخول.
   if (Capacitor.isNativePlatform()) {
     let outcome: Awaited<ReturnType<typeof nativeSendOtp>>
     try {
@@ -378,14 +389,35 @@ export async function verifyOtpCode(
   if (!/^\d{6}$/.test(code)) {
     return { ok: false, message: 'الكود 6 أرقام — اكتب الكود اللي وصلك في رسالة SMS.' }
   }
-  // --- أندرويد: تأكيد أصلي ---
+  // --- أندرويد: تأكيد الكود ---
+  // الجسر (v3): الكود اتبعت من الإضافة الأصلية (verificationId أصلي)،
+  // لكن لازم يتأكّد في JS SDK عشان Firestore — اللي بيشتغل من JS SDK —
+  // يشوف المستخدم مسجّل دخول وتتقبل قواعد request.auth != null.
+  // جرّب الويب الأول؛ ولو فشل، ارجع للتأكيد الأصلي عشان الدخول نفسه
+  // يفضل شغال (وفي الحالة دي Firestore هيفضل مرفوض — رسالة الخطأ
+  // الحقيقية هتظهر عند الحفظ).
+  // ملحوظة: التحقق الفوري (autoVerified، من غير كود) مفيهوش verificationId
+  // ولا كود فماينفعش يتجسّر — حالة نادرة، والكود اليدوي هو المسار المعتاد.
   if (Capacitor.isNativePlatform()) {
-    if (!nativeVerificationId) {
+    const verificationId = nativeVerificationId
+    if (!verificationId) {
       return { ok: false, message: 'اطلب كود الأول — دوس «ابعت كود التحقق».' }
+    }
+    const auth = getFirebaseAuth()
+    if (auth) {
+      try {
+        const credential = PhoneAuthProvider.credential(verificationId, code)
+        await signInWithCredential(auth, credential)
+        nativeVerificationId = null
+        return { ok: true, message: 'تم تأكيد رقمك بنجاح.' }
+      } catch (e) {
+        console.warn('Web phone credential sign-in failed, falling back to native confirm:', e)
+        // لو الكود نفسه غلط، التأكيد الأصلي هيفشل برضه بنفس الخطأ.
+      }
     }
     try {
       await FirebaseAuthentication.confirmVerificationCode({
-        verificationId: nativeVerificationId,
+        verificationId,
         verificationCode: code,
       })
       nativeVerificationId = null
