@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v15)
+//  Top Service — المرحلة 1 (v16)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -30,6 +30,7 @@ import {
   loadCollection,
   loadCompounds,
   loadCustomer,
+  loadPackages,
   loadPaymentsOfCustomer,
   loadSubscriptionsOfCustomer,
   loadWashHistoryOfCustomer,
@@ -44,6 +45,7 @@ import {
   recordWashDone,
   rejectPayment,
   saveDoc,
+  savePackages,
   setFirestoreErrorHandler,
   subscribeCollection,
 } from './firebaseDb'
@@ -74,6 +76,7 @@ import type {
   CollectionStatus,
   Compound,
   Customer,
+  PackageDef,
   Payment,
   PaymentMethod,
   Phase,
@@ -268,6 +271,8 @@ export default function App() {
   const [otpSent, setOtpSent] = useState(false)
   const [otpLeft, setOtpLeft] = useState(3)
   const [compounds, setCompounds] = useState<Compound[]>([])
+  // الباقات الفعّالة: من مستند settings/packages لو موجود، وإلا الافتراضية
+  const [packages, setPackages] = useState<PackageDef[]>(PACKAGES)
   const [pendingSession, setPendingSession] = useState<Session | null>(null)
   // نموذج استكمال البيانات (عميل)
   const [profName, setProfName] = useState('')
@@ -293,6 +298,9 @@ export default function App() {
       )
     }
     void loadCompounds().then(setCompounds)
+    void loadPackages().then((p) => {
+      if (p) setPackages(p)
+    })
     return () => setFirestoreErrorHandler(null)
   }, [])
 
@@ -524,7 +532,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 15 — المرحلة 1</span>
+        <span className="badge">الإصدار 16 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -686,6 +694,7 @@ export default function App() {
         <CustomerView
           session={session}
           compounds={compounds}
+          packages={packages}
           onNotice={setNotice}
           onLogout={logout}
           onSwitchToAdmin={switchToAdmin}
@@ -699,6 +708,8 @@ export default function App() {
           session={session}
           compounds={compounds}
           onCompounds={setCompounds}
+          packages={packages}
+          onPackages={setPackages}
           onNotice={setNotice}
           onLogout={logout}
           onSwitchToCustomer={switchToCustomer}
@@ -706,7 +717,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 15</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 16</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -721,12 +732,14 @@ export default function App() {
 function CustomerView({
   session,
   compounds,
+  packages,
   onNotice,
   onLogout,
   onSwitchToAdmin,
 }: {
   session: Session
   compounds: Compound[]
+  packages: PackageDef[]
   onNotice: (m: string) => void
   onLogout: () => void
   onSwitchToAdmin: () => void
@@ -747,7 +760,7 @@ function CustomerView({
   const [carPhoto, setCarPhoto] = useState<string | null>(null)
   // نموذج الاشتراك
   const [subCarId, setSubCarId] = useState<string | null>(null)
-  const [subPkg, setSubPkg] = useState<4 | 8 | 12>(4)
+  const [subPkg, setSubPkg] = useState<number>(4)
   const [subMethod, setSubMethod] = useState<PaymentMethod>('cash')
   // معالج الاشتراك الموجَّه (v15): كومباوند ← نموذج ← عدد الغسلات
   const [wizStep, setWizStep] = useState<1 | 2 | 3>(1)
@@ -902,7 +915,7 @@ function CustomerView({
    *  متعبّية من ملف العميل لو موجودة. */
   function openWizard(carId: string) {
     setSubCarId(carId)
-    setSubPkg(4)
+    setSubPkg(packages[0]?.id ?? 4)
     setSubMethod('cash')
     setWizStep(1)
     setWizCompoundId(customer?.compoundId ?? null)
@@ -925,7 +938,11 @@ function CustomerView({
     if (!subCarId) return
     const car = cars.find((c) => c.id === subCarId)
     if (!car) return
-    const pkg = packageById(subPkg)
+    const pkg = packageById(subPkg, packages)
+    if (!pkg) {
+      onNotice('لسه مفيش باقات — كلم الشركة على 01050015559.')
+      return
+    }
     const active = activeSubFor(car.id)
     if (active) {
       onNotice(`العربية دي عندها اشتراك نشط حتى ${fmtDate(active.endDate)} — جدّد بعد ما ينتهي.`)
@@ -1417,7 +1434,12 @@ function CustomerView({
                           </b>
                         </p>
                         <label>اختار عدد الغسلات</label>
-                        {PACKAGES.map((p) => (
+                        {packages.length === 0 && (
+                          <p className="muted">
+                            لسه مفيش باقات — كلم الشركة على {COMPANY_PHONE}.
+                          </p>
+                        )}
+                        {packages.map((p) => (
                           <div
                             key={p.id}
                             className={`pkg${subPkg === p.id ? ' selected' : ''}`}
@@ -1912,6 +1934,14 @@ function PhaseEditor({
     )
   }
 
+  /** نموذج جاهز بضغطة واحدة — الأيام بأرقام getDay(): 0=الأحد … 6=السبت.
+   *  حد/تلات/خميس = [0, 2, 4]، سبت/اتنين/أربع = [6, 1, 3].
+   *  لو اسم المرحلة فاضي بيتملّى تلقائياً (نموذج A / نموذج B). */
+  function applyPreset(presetDays: number[], defaultName: string) {
+    setDays([...presetDays].sort((a, b) => a - b))
+    if (!name.trim()) setName(defaultName)
+  }
+
   function addPhase() {
     if (days.length === 0) return
     const label = phaseDaysLabel(days)
@@ -1952,6 +1982,14 @@ function PhaseEditor({
       />
       <label>أيام المرحلة</label>
       <div className="row" style={{ flexWrap: 'wrap' }}>
+        <button type="button" className="btn small" onClick={() => applyPreset([0, 2, 4], 'نموذج A')}>
+          حد / تلات / خميس
+        </button>
+        <button type="button" className="btn small" onClick={() => applyPreset([6, 1, 3], 'نموذج B')}>
+          سبت / اتنين / أربع
+        </button>
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
         {WEEK_PICK_ORDER.map((d) => (
           <label
             key={d}
@@ -1977,6 +2015,8 @@ function AdminView({
   session,
   compounds,
   onCompounds,
+  packages,
+  onPackages,
   onNotice,
   onLogout,
   onSwitchToCustomer,
@@ -1984,6 +2024,8 @@ function AdminView({
   session: Session
   compounds: Compound[]
   onCompounds: (c: Compound[]) => void
+  packages: PackageDef[]
+  onPackages: (p: PackageDef[]) => void
   onNotice: (m: string) => void
   onLogout: () => void
   onSwitchToCustomer: () => void
@@ -2008,6 +2050,13 @@ function AdminView({
   const [newWasherName, setNewWasherName] = useState('')
   const [newWasherPhone, setNewWasherPhone] = useState('')
   const [newWasherCompounds, setNewWasherCompounds] = useState<string[]>([])
+  // إدارة: الباقات (عدد الغسلات + السعر) — إضافة باقة جديدة
+  const [newPkgWashes, setNewPkgWashes] = useState('')
+  const [newPkgPrice, setNewPkgPrice] = useState('')
+  // تعديل: باقة
+  const [editingPkgId, setEditingPkgId] = useState<number | null>(null)
+  const [editPkgWashes, setEditPkgWashes] = useState('')
+  const [editPkgPrice, setEditPkgPrice] = useState('')
   // تعديل: كومباوند
   const [editingCompoundId, setEditingCompoundId] = useState<string | null>(null)
   const [editCompoundName, setEditCompoundName] = useState('')
@@ -2313,6 +2362,126 @@ function AdminView({
     const list = await loadCompounds()
     onCompounds(list)
     onNotice(`تم تعديل كومباوند ${editCompoundName.trim()} ✅`)
+  }
+
+  /** إضافة/حذف مرحلة في نموذج التعديل بيتحفظ فوراً على السيرفر —
+   *  مفيش "حفظ التعديل" يتنسى. عند الفشل بترجع الحالة لقيمة السيرفر.
+   *  حذف مرحلة بيفكّ ربط أي عربية كانت عليها (زي حفظ التعديل). */
+  async function handleEditPhasesChange(next: Phase[]) {
+    if (!editingCompoundId) return
+    const prev = editCompoundPhases
+    const removedIds = prev
+      .map((p) => p.id)
+      .filter((id) => !next.some((p) => p.id === id))
+    setEditCompoundPhases(next)
+    setBusyId(`edit-compound-phases:${editingCompoundId}`)
+    const ok = await saveDoc('compounds', editingCompoundId, { phases: next })
+    setBusyId(null)
+    if (!ok) {
+      const server = compounds.find((c) => c.id === editingCompoundId)
+      setEditCompoundPhases([...(server?.phases ?? [])])
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ المرحلة — حاول تاني.')
+      return
+    }
+    if (removedIds.length > 0) {
+      const cars = await loadAllCars()
+      await Promise.all(
+        cars
+          .filter((car) => car.phaseId && removedIds.includes(car.phaseId))
+          .map((car) => saveDoc('cars', car.id, { phaseId: null })),
+      )
+      await loadAll()
+    }
+    const list = await loadCompounds()
+    onCompounds(list)
+    onNotice(removedIds.length > 0 ? 'تم حذف المرحلة ✅' : 'تم حفظ المرحلة ✅')
+  }
+
+  // ---- الباقات (عدد الغسلات + السعر) — من لوحة الأدمن ----
+  /** تحقق من مدخلات باقة: عدد غسلات صحيح موجب + سعر موجب. */
+  function parsePkgInputs(
+    washesStr: string,
+    priceStr: string,
+  ): { washes: number; price: number } | null {
+    const washes = Number(washesStr)
+    const price = Number(priceStr)
+    if (!Number.isInteger(washes) || washes <= 0) return null
+    if (!Number.isFinite(price) || price <= 0) return null
+    return { washes, price }
+  }
+
+  async function savePackagesList(next: PackageDef[], successMsg: string) {
+    setBusyId('packages')
+    const ok = await savePackages(next)
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ الباقات — حاول تاني.')
+      return
+    }
+    onPackages(next)
+    onNotice(successMsg)
+  }
+
+  function startEditPkg(p: PackageDef) {
+    setEditingPkgId(p.id)
+    setEditPkgWashes(String(p.washes))
+    setEditPkgPrice(String(p.price))
+    setConfirmDeleteId(null)
+  }
+
+  async function saveEditPkg() {
+    if (editingPkgId === null) return
+    const parsed = parsePkgInputs(editPkgWashes, editPkgPrice)
+    if (!parsed) {
+      onNotice('اكتب عدد غسلات صحيح (أكبر من صفر) وسعر أكبر من صفر.')
+      return
+    }
+    if (packages.some((p) => p.washes === parsed.washes && p.id !== editingPkgId)) {
+      onNotice('في باقة بنفس عدد الغسلات دي — غيّر العدد.')
+      return
+    }
+    const next = packages
+      .map((p) =>
+        p.id === editingPkgId
+          ? { id: parsed.washes, washes: parsed.washes, price: parsed.price }
+          : p,
+      )
+      .sort((a, b) => a.washes - b.washes)
+    setEditingPkgId(null)
+    await savePackagesList(next, 'تم تعديل الباقة ✅')
+  }
+
+  async function addPkg() {
+    const parsed = parsePkgInputs(newPkgWashes, newPkgPrice)
+    if (!parsed) {
+      onNotice('اكتب عدد غسلات صحيح (أكبر من صفر) وسعر أكبر من صفر.')
+      return
+    }
+    if (packages.some((p) => p.washes === parsed.washes)) {
+      onNotice('في باقة بنفس عدد الغسلات دي — غيّر العدد.')
+      return
+    }
+    const next = [...packages, { id: parsed.washes, washes: parsed.washes, price: parsed.price }].sort(
+      (a, b) => a.washes - b.washes,
+    )
+    setNewPkgWashes('')
+    setNewPkgPrice('')
+    await savePackagesList(next, 'تمت إضافة الباقة ✅')
+  }
+
+  async function deletePkg(p: PackageDef) {
+    const key = `package:${p.id}`
+    if (confirmDeleteId !== key) {
+      setConfirmDeleteId(key)
+      return
+    }
+    setConfirmDeleteId(null)
+    if (packages.length <= 1) {
+      onNotice('لازم يفضل باقة واحدة على الأقل — مينفعش تحذف آخر باقة.')
+      return
+    }
+    const next = packages.filter((x) => x.id !== p.id)
+    await savePackagesList(next, `تم حذف باقة ${p.washes} غسلات.`)
   }
 
   async function deleteCompound(c: Compound) {
@@ -2903,12 +3072,18 @@ function AdminView({
                       value={editCompoundName}
                       onChange={(e) => setEditCompoundName(e.target.value)}
                     />
-                    <PhaseEditor phases={editCompoundPhases} onChange={setEditCompoundPhases} />
+                    <PhaseEditor
+                      phases={editCompoundPhases}
+                      onChange={(next) => void handleEditPhasesChange(next)}
+                    />
                     <div className="row">
                       <button
                         className="btn small active"
                         type="submit"
-                        disabled={busyId === `edit-compound:${c.id}`}
+                        disabled={
+                          busyId === `edit-compound:${c.id}` ||
+                          busyId === `edit-compound-phases:${c.id}`
+                        }
                       >
                         {busyId === `edit-compound:${c.id}` ? 'بيحفظ…' : 'حفظ التعديل'}
                       </button>
@@ -2951,6 +3126,98 @@ function AdminView({
                 <PlusIcon /> إضافة الكومباوند
               </button>
             </form>
+          </div>
+          <div className="card">
+            <h2>الباقات ({packages.length})</h2>
+            <p className="muted">
+              عدد الغسلات والسعر اللي العميل بيختار منهم في الاشتراك — التعديل هنا بيأثر
+              على الاشتراكات الجديدة بس، والاشتراكات الحالية بتفضل بأسعارها.
+            </p>
+            {packages.map((p) => (
+              <div className="ride" key={p.id}>
+                {editingPkgId === p.id ? (
+                  <>
+                    <div className="row">
+                      <div style={{ flex: 1 }}>
+                        <label>عدد الغسلات</label>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={editPkgWashes}
+                          onChange={(e) => setEditPkgWashes(e.target.value)}
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label>السعر (جنيه)</label>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={editPkgPrice}
+                          onChange={(e) => setEditPkgPrice(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div className="row">
+                      <button
+                        className="btn small active"
+                        onClick={() => void saveEditPkg()}
+                        disabled={busyId === 'packages'}
+                      >
+                        {busyId === 'packages' ? 'بيحفظ…' : 'حفظ'}
+                      </button>
+                      <button className="btn small" onClick={() => setEditingPkgId(null)}>
+                        إلغاء
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <b>باقة {p.washes} غسلات / شهر</b>
+                    <div className="muted">
+                      {p.price} جنيه — {Math.round(p.price / p.washes)} جنيه للغسلة الواحدة
+                    </div>
+                    <div className="row">
+                      <button className="btn small" onClick={() => startEditPkg(p)}>
+                        ✏️ تعديل
+                      </button>
+                      <button
+                        className="btn small danger"
+                        onClick={() => void deletePkg(p)}
+                        disabled={busyId === 'packages'}
+                      >
+                        {confirmDeleteId === `package:${p.id}` ? 'تأكيد الحذف؟' : '🗑️ حذف'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+            <h3>إضافة باقة</h3>
+            <div className="row">
+              <div style={{ flex: 1 }}>
+                <label>عدد الغسلات</label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="مثال: 6"
+                  value={newPkgWashes}
+                  onChange={(e) => setNewPkgWashes(e.target.value)}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label>السعر (جنيه)</label>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="مثال: 175"
+                  value={newPkgPrice}
+                  onChange={(e) => setNewPkgPrice(e.target.value)}
+                />
+              </div>
+            </div>
+            <button className="btn big" onClick={() => void addPkg()} disabled={busyId === 'packages'}>
+              <PlusIcon /> إضافة الباقة
+            </button>
           </div>
           <div className="card">
             <h2>عمال الغسيل ({washers.length})</h2>

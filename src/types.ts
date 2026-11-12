@@ -45,20 +45,24 @@ export interface Car {
 }
 
 export interface PackageDef {
-  id: 4 | 8 | 12
+  /** معرّف الباقة = عدد غسلاتها (4 أو 8 أو 12 افتراضياً — الأدمن يقدر يضيف
+   *  أي عدد من لوحة الإدارة، فالنوع رقم عام مش اتحاد ثابت). */
+  id: number
   washes: number
   price: number
 }
 
-/** الباقات الشهرية — الأساس التجاري (من السكريبت، البند 6). */
+/** الباقات الشهرية الافتراضية — الأساس التجاري (من السكريبت، البند 6).
+ *  الأدمن يقدر يعدّلها من لوحة الإدارة (مستند settings/packages)؛
+ *  دي القيمة الاحتياطية لو المستند لسه مش موجود. */
 export const PACKAGES: PackageDef[] = [
   { id: 4, washes: 4, price: 100 },
   { id: 8, washes: 8, price: 150 },
   { id: 12, washes: 12, price: 200 },
 ]
 
-export function packageById(id: number): PackageDef {
-  return PACKAGES.find((p) => p.id === id) ?? PACKAGES[0]
+export function packageById(id: number, list: PackageDef[] = PACKAGES): PackageDef {
+  return list.find((p) => p.id === id) ?? list[0]
 }
 
 export type SubscriptionStatus =
@@ -74,7 +78,7 @@ export interface Subscription {
   customerName: string
   carPlate: string
   carType: string
-  packageId: 4 | 8 | 12
+  packageId: number
   price: number
   washesTotal: number
   /** حقل قديم للتوافق مع مستندات سابقة — الرصيد شهري مش عدد غسلات،

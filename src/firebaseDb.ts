@@ -46,6 +46,7 @@ import type {
   Car,
   Compound,
   Customer,
+  PackageDef,
   Payment,
   Phase,
   Subscription,
@@ -215,7 +216,7 @@ export function normalizeSubscription(id: string, d: Record<string, unknown>): S
     customerName: p.customerName ?? '',
     carPlate: p.carPlate ?? '',
     carType: p.carType ?? '',
-    packageId: (p.packageId as 4 | 8 | 12) ?? 4,
+    packageId: typeof p.packageId === 'number' ? p.packageId : 4,
     price: p.price ?? 0,
     washesTotal: p.washesTotal ?? 0,
     washesRemaining: p.washesRemaining ?? 0,
@@ -332,6 +333,43 @@ export async function loadWashHistoryOfCustomer(phone: string): Promise<WashRequ
 export async function loadCompounds(): Promise<Compound[]> {
   const rows = await loadCollection('compounds', [orderBy('name')])
   return rows.map((r) => normalizeCompound(r.id, r))
+}
+
+/** تطبيع قائمة الباقات من مستند settings/packages — إدخالات غير صالحة
+ *  (عدد غسلات أو سعر مش رقم موجب) بتتخطى، ولو مفيش ولا باقة صالحة
+ *  بيرجع null عشان التطبيق يقع على الباقات الافتراضية. */
+function normalizePackages(d: Record<string, unknown>): PackageDef[] | null {
+  const raw = d.packages
+  if (!Array.isArray(raw)) return null
+  const seen = new Set<number>()
+  const list: PackageDef[] = []
+  for (const item of raw) {
+    const p = item as Partial<PackageDef> | null
+    if (!p || typeof p !== 'object') continue
+    const washes = typeof p.washes === 'number' ? Math.floor(p.washes) : NaN
+    const price = typeof p.price === 'number' ? p.price : NaN
+    if (!Number.isFinite(washes) || washes <= 0) continue
+    if (!Number.isFinite(price) || price <= 0) continue
+    const id = typeof p.id === 'number' && Number.isFinite(p.id) ? p.id : washes
+    if (seen.has(id)) continue
+    seen.add(id)
+    list.push({ id, washes, price })
+  }
+  if (list.length === 0) return null
+  return list.sort((a, b) => a.washes - b.washes)
+}
+
+/** باقات الأدمن من مستند settings/packages — null لو المستند مش موجود
+ *  أو فاضي أو غير صالح (وقتها التطبيق بيستخدم الباقات الافتراضية). */
+export async function loadPackages(): Promise<PackageDef[] | null> {
+  const d = await loadDoc('settings', 'packages')
+  if (!d) return null
+  return normalizePackages(d)
+}
+
+/** حفظ باقات الأدمن في مستند settings/packages. */
+export async function savePackages(pkgs: PackageDef[]): Promise<boolean> {
+  return saveDoc('settings', 'packages', { packages: pkgs })
 }
 
 /** كل الاشتراكات (للأدمن) — الأحدث أولاً. */
