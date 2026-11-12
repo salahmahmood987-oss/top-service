@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v7)
+//  Top Service — المرحلة 1 (v8)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -483,6 +483,9 @@ export default function App() {
     setGate('main')
   }
 
+  // رقم الأدمن معفي من حد الـ 3 أكواد في الساعة — سطر "فاضل X من 3" مبيظهرلوش
+  const isAdminPhone = toE164Phone(phoneInput) === ADMIN_PHONE
+
   return (
     <div className="app">
       <header className="header">
@@ -507,7 +510,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 7 — المرحلة 1</span>
+        <span className="badge">الإصدار 8 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -534,7 +537,9 @@ export default function App() {
           <button className="btn big" onClick={() => void sendCode()} disabled={otpBusy}>
             {otpBusy ? 'بيبعت الكود…' : 'ابعت كود التحقق'}
           </button>
-          {otpSent && <p className="muted">فاضل {otpLeft} من 3 طلبات كود في الساعة للرقم ده.</p>}
+          {otpSent && !isAdminPhone && (
+            <p className="muted">فاضل {otpLeft} من 3 طلبات كود في الساعة للرقم ده.</p>
+          )}
           <div id="recaptcha-container" />
         </div>
       )}
@@ -544,7 +549,7 @@ export default function App() {
           <h2>اكتب الكود اللي وصلك</h2>
           <p className="muted">
             بعتنا كود من 6 أرقام على {phoneInput.trim()} — اكتبه هنا.
-            {otpLeft > 0 ? ` (فاضل ${otpLeft} من 3 طلبات في الساعة)` : ''}
+            {!isAdminPhone && otpLeft > 0 ? ` (فاضل ${otpLeft} من 3 طلبات في الساعة)` : ''}
           </p>
           <input
             type="text"
@@ -687,7 +692,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 7</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 8</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}

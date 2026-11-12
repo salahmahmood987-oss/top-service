@@ -29,7 +29,7 @@ import {
 import type { ConfirmationResult } from 'firebase/auth'
 import { getFirebaseAuth } from './firebaseApp'
 import { isFirebaseConfigured } from './firebaseConfig'
-import { OTP_MAX_PER_HOUR } from './types'
+import { ADMIN_PHONE, OTP_MAX_PER_HOUR } from './types'
 
 const OTP_KEY = 'topservice_otp_v1'
 
@@ -247,6 +247,7 @@ async function nativeSendOtp(e164: string): Promise<NativeSendOutcome> {
 /**
  * يطلب كود تحقق حقيقي برسالة SMS. يطبق حد التطبيق (3 في الساعة لكل رقم)
  * قبل مناداة Firebase، فلا يتحرق SMS على الفاضي.
+ * الاستثناء: رقم الأدمن (صلاح) معفي من الحد — يبعت أي عدد من الأكواد.
  */
 export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
   if (!isFirebaseConfigured) {
@@ -266,10 +267,12 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
   }
 
   // حد التطبيق: 3 في الساعة لكل رقم (قبل Firebase)
+  // الأدمن معفي من الحد — يبعت أي عدد من الأكواد (recent فاضية دايماً له)
+  const isAdmin = e164 === ADMIN_PHONE
   const now = Date.now()
   const records = load()
   const rec = records[phone] || { requests: [] }
-  const recent = pruneRequests(rec.requests, now)
+  const recent = isAdmin ? [] : pruneRequests(rec.requests, now)
   if (recent.length >= OTP_MAX_PER_HOUR) {
     const oldest = Math.min(...recent)
     const waitMs = 60 * 60 * 1000 - (now - oldest)
@@ -320,9 +323,11 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
           : outcome.message,
       }
     }
-    // سجّل الطلب بعد الإرسال الناجح بس (مش على الفشل)
-    records[phone] = { requests: [...recent, now] }
-    save(records)
+    // سجّل الطلب بعد الإرسال الناجح بس (مش على الفشل) — الأدمن مبيتسجّلش أصلاً
+    if (!isAdmin) {
+      records[phone] = { requests: [...recent, now] }
+      save(records)
+    }
     const remaining = OTP_MAX_PER_HOUR - recent.length - 1
     if (outcome.kind === 'completed') {
       // تحقق فوري: Firebase أكّد الرقم وسجّل الدخول بدون SMS
@@ -359,9 +364,11 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
     await verifier.render()
     confirmation = await signInWithPhoneNumber(auth, e164, verifier)
 
-    // سجّل الطلب بعد الإرسال الناجح بس (مش على الفشل)
-    records[phone] = { requests: [...recent, now] }
-    save(records)
+    // سجّل الطلب بعد الإرسال الناجح بس (مش على الفشل) — الأدمن مبيتسجّلش أصلاً
+    if (!isAdmin) {
+      records[phone] = { requests: [...recent, now] }
+      save(records)
+    }
     const remaining = OTP_MAX_PER_HOUR - recent.length - 1
     return {
       ok: true,
@@ -450,8 +457,9 @@ export async function verifyOtpCode(
   }
 }
 
-/** كم طلب كود فاضل للرقم ده في الساعة الحالية؟ */
+/** كم طلب كود فاضل للرقم ده في الساعة الحالية؟ الأدمن دايماً عنده الحد كامل. */
 export function otpRemaining(phone: string): number {
+  if (toE164Phone(phone) === ADMIN_PHONE) return OTP_MAX_PER_HOUR
   const rec = load()[phone.trim()]
   if (!rec) return OTP_MAX_PER_HOUR
   return Math.max(
