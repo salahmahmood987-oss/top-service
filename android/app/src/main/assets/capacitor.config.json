@@ -1,0 +1,19 @@
+{
+	"appId": "com.topservice.app",
+	"appName": "Top Service",
+	"webDir": "dist",
+	"backgroundColor": "#fdf6f0",
+	"android": {
+		"allowMixedContent": true
+	},
+	"server": {
+		"cleartext": true
+	},
+	"plugins": {
+		"FirebaseAuthentication": {
+			"providers": [
+				"phone"
+			]
+		}
+	}
+}

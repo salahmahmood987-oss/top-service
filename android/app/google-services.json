@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "276599205345",
+    "project_id": "top-service-d367b",
+    "storage_bucket": "top-service-d367b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:276599205345:android:0e9bd58344f20bd34e36a0",
+        "android_client_info": {
+          "package_name": "com.topservice.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAVD-e7mUmk3gvoaSfhSvllpPGbcnH7aoA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

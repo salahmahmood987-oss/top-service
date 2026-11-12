@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Top Service</string>
+    <string name="title_activity_main">Top Service</string>
+    <string name="package_name">com.topservice.app</string>
+    <string name="custom_url_scheme">com.topservice.app</string>
+</resources>
