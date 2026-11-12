@@ -59,8 +59,14 @@ let errorHandler: ((message: string) => void) | null = null
 export function setFirestoreErrorHandler(fn: ((message: string) => void) | null) {
   errorHandler = fn
 }
+/** آخر خطأ Firestore — عشان شاشة الحفظ تعرض السبب الحقيقي بدل رسالة عامة. */
+let lastError: string | null = null
+export function getLastFirestoreError(): string | null {
+  return lastError
+}
 function reportError(where: string, e: unknown) {
   const msg = e instanceof Error ? e.message : String(e)
+  lastError = `${where}: ${msg}`
   console.warn(`Firestore ${where} failed:`, e)
   errorHandler?.(`${where}: ${msg}`)
 }
@@ -335,19 +341,19 @@ export async function loadAllCars(): Promise<Car[]> {
   return rows.map((r) => normalizeCar(r.id, r)).sort((a, b) => b.createdAt - a.createdAt)
 }
 
-/** كل الغسّالين (للأدمن). */
+/** كل عمال الغسيل (للأدمن). */
 export async function loadAllWashers(): Promise<Washer[]> {
   const rows = await loadCollection('washers')
   return rows.map((r) => normalizeWasher(r.id, r)).sort((a, b) => b.createdAt - a.createdAt)
 }
 
-/** طلبات الغسيل الجارية (للغسّال والأدمن) — الأقدم أولاً (أولوية التنفيذ). */
+/** طلبات الغسيل الجارية (للعامل الغسيل والأدمن) — الأقدم أولاً (أولوية التنفيذ). */
 export async function loadOpenWashRequests(): Promise<WashRequest[]> {
   const rows = await loadCollection('washRequests', [where('status', '==', 'requested')])
   return rows.map((r) => normalizeWash(r.id, r)).sort((a, b) => a.requestedAt - b.requestedAt)
 }
 
-/** غسلات الغسّال المنجزة (سجله). */
+/** غسلات عامل الغسيل المنجزة (سجله). */
 export async function loadWasherDoneWashes(phone: string): Promise<WashRequest[]> {
   const rows = await loadCollection('washRequests', [where('doneByPhone', '==', phone)])
   return rows

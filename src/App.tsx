@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v1)
-//  دخول OTP خطوة بخطوة (دور ← تليفون ← كود) + بيانات العميل والعربية +
-//  باقات + طلب غسلة + عدّاد رصيد + لوحة أدمن + تأكيد دفع يدوي.
+//  Top Service — المرحلة 1 (v2)
+//  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
+//  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
+//  بيانات العميل والعربية + باقات + طلب غسلة + عدّاد رصيد + لوحة أدمن + تأكيد دفع يدوي.
 //  لا توجد بيانات وهمية — كل رقم من Firestore (أو حالة "غير مربوط" صادقة).
 //  الأخطاء والرسائل في مودال وسط الشاشة، وليست شريطاً علوياً.
 // ---------------------------------------------------------------------------
@@ -15,6 +16,7 @@ import { isFirebaseConfigured } from './firebaseConfig'
 import {
   approvePayment,
   completeWash,
+  getLastFirestoreError,
   loadAllCars,
   loadAllCustomers,
   loadAllPayments,
@@ -59,7 +61,6 @@ import type {
   Customer,
   Payment,
   PaymentMethod,
-  Role,
   Subscription,
   Washer,
   WashRequest,
@@ -226,13 +227,12 @@ function PhotoField({
 //  التطبيق
 // ---------------------------------------------------------------------------
 
-type GateStep = 'role' | 'phone' | 'otp' | 'profile' | 'main'
+type GateStep = 'phone' | 'otp' | 'profile' | 'main'
 
 export default function App() {
   const [notice, setNotice] = useState<string | null>(null)
   const [session, setSession] = useState<Session | null>(null)
-  const [gate, setGate] = useState<GateStep>('role')
-  const [roleSel, setRoleSel] = useState<Role>('customer')
+  const [gate, setGate] = useState<GateStep>('phone')
   const [phoneInput, setPhoneInput] = useState('')
   const [otpCode, setOtpCode] = useState('')
   const [otpBusy, setOtpBusy] = useState(false)
@@ -271,7 +271,7 @@ export default function App() {
     clearSession()
     setSession(null)
     setPendingSession(null)
-    setGate('role')
+    setGate('phone')
     setPhoneInput('')
     setOtpCode('')
     setOtpSent(false)
@@ -281,10 +281,6 @@ export default function App() {
     const e164 = toE164Phone(phoneInput)
     if (!e164) {
       setNotice('رقم التليفون غير صحيح — اكتب رقم مصري 11 رقم يبدأ بـ 01.')
-      return
-    }
-    if (roleSel === 'admin' && e164 !== ADMIN_PHONE) {
-      setNotice('دور الأدمن متاح لرقم صلاح بس — اختار دور تاني أو اكتب رقم الأدمن.')
       return
     }
     setOtpBusy(true)
@@ -320,53 +316,80 @@ export default function App() {
     await afterVerify(e164)
   }
 
-  /** بعد تأكيد OTP: نحفظ الجلسة، ونشوف هل الملف الشخصي موجود ولا لأ. */
+  /** بعد تأكيد OTP: الدور بيتحدد من الرقم نفسه — رقم الأدمن → أدمن،
+   *  رقم مسجّل كعامل غسيل (الأدمن ضافه) → عامل غسيل، غير كده → عميل.
+   *  بعدها نشوف هل الملف الشخصي موجود ولا لأ. */
   async function afterVerify(e164: string) {
-    const base: Session = {
-      role: roleSel,
-      phone: e164,
-      phoneDisplay: phoneInput.trim(),
-      name: '',
-      verified: true,
-    }
-    if (roleSel === 'admin') {
-      const s: Session = { ...base, name: 'صلاح' }
+    const phoneDisplay = phoneInput.trim()
+    if (e164 === ADMIN_PHONE) {
+      const s: Session = { role: 'admin', phone: e164, phoneDisplay, name: 'صلاح', verified: true }
       saveSession(s)
       setSession(s)
       setGate('main')
       return
     }
-    if (roleSel === 'customer') {
-      const c = await loadCustomer(e164)
-      if (c && c.name) {
-        const s: Session = { ...base, name: c.name }
+    const w = await loadWasher(e164)
+    if (w) {
+      if (w.name) {
+        const s: Session = { role: 'washer', phone: e164, phoneDisplay, name: w.name, verified: true }
         saveSession(s)
         setSession(s)
         setGate('main')
       } else {
+        const base: Session = { role: 'washer', phone: e164, phoneDisplay, name: '', verified: true }
         setPendingSession(base)
         setProfName('')
-        setProfCompound('')
-        setProfCompoundManual('')
-        setProfBuilding('')
-        setProfApartment('')
-        setProfPhoto(null)
         setGate('profile')
       }
       return
     }
-    // غسّال
-    const w = await loadWasher(e164)
-    if (w && w.name) {
-      const s: Session = { ...base, name: w.name }
+    const c = await loadCustomer(e164)
+    if (c && c.name) {
+      const s: Session = { role: 'customer', phone: e164, phoneDisplay, name: c.name, verified: true }
       saveSession(s)
       setSession(s)
       setGate('main')
     } else {
+      const base: Session = { role: 'customer', phone: e164, phoneDisplay, name: '', verified: true }
       setPendingSession(base)
       setProfName('')
+      setProfCompound('')
+      setProfCompoundManual('')
+      setProfBuilding('')
+      setProfApartment('')
+      setProfPhoto(null)
       setGate('profile')
     }
+  }
+
+  /** الأدمن (صلاح) يقدر يعرض التطبيق كعميل بنفس رقمه — ويرجع للأدمن من الملف الشخصي. */
+  async function switchToCustomer() {
+    if (!session || session.phone !== ADMIN_PHONE) return
+    const c = await loadCustomer(session.phone)
+    if (c && c.name) {
+      const s: Session = { ...session, role: 'customer', name: c.name }
+      saveSession(s)
+      setSession(s)
+      setGate('main')
+    } else {
+      const base: Session = { ...session, role: 'customer', name: '' }
+      setPendingSession(base)
+      setProfName('')
+      setProfCompound('')
+      setProfCompoundManual('')
+      setProfBuilding('')
+      setProfApartment('')
+      setProfPhoto(null)
+      setGate('profile')
+    }
+  }
+
+  function switchToAdmin() {
+    if (!session || session.phone !== ADMIN_PHONE) return
+    const s: Session = { ...session, role: 'admin', name: 'صلاح' }
+    saveSession(s)
+    setSession(s)
+    setGate('main')
   }
 
   async function saveProfile(e: FormEvent) {
@@ -392,7 +415,7 @@ export default function App() {
       })
       setProfBusy(false)
       if (!ok) {
-        setNotice('مقدرناش نحفظ البيانات — تأكد إن النت شغال وحاول تاني.')
+        setNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ البيانات — تأكد إن النت شغال وحاول تاني.')
         return
       }
       const done: Session = { ...s, name: profName.trim() }
@@ -435,7 +458,7 @@ export default function App() {
     })
     setProfBusy(false)
     if (!ok) {
-      setNotice('مقدرناش نحفظ البيانات — تأكد إن النت شغال وحاول تاني.')
+      setNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ البيانات — تأكد إن النت شغال وحاول تاني.')
       return
     }
     const done: Session = { ...s, name: profName.trim() }
@@ -453,7 +476,7 @@ export default function App() {
           <span className="brand">Top Service</span>
         </h1>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 1 — المرحلة 1</span>
+        <span className="badge">الإصدار 2 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -463,46 +486,11 @@ export default function App() {
         </div>
       )}
 
-      {gate === 'role' && (
-        <div className="card role-picker">
-          <h2>أهلاً بيك في Top Service</h2>
-          <p className="muted">اختار دورك عشان نكمّل تسجيل الدخول</p>
-          <button
-            className="btn big role-btn"
-            onClick={() => {
-              setRoleSel('customer')
-              setGate('phone')
-            }}
-          >
-            <CarIcon /> أنا عميل — صاحب عربية
-          </button>
-          <button
-            className="btn big role-btn plum"
-            onClick={() => {
-              setRoleSel('washer')
-              setGate('phone')
-            }}
-          >
-            <DropIcon /> أنا غسّال
-          </button>
-          <button
-            className="btn big role-btn plum"
-            onClick={() => {
-              setRoleSel('admin')
-              setGate('phone')
-            }}
-          >
-            <ShieldIcon /> أنا الأدمن (صلاح)
-          </button>
-        </div>
-      )}
-
       {gate === 'phone' && (
         <div className="card">
-          <h2>
-            {roleSel === 'customer' ? 'دخول العميل' : roleSel === 'washer' ? 'دخول الغسّال' : 'دخول الأدمن'}
-          </h2>
-          <p className="muted">هنبعتلك كود تحقق من 6 أرقام في رسالة SMS على رقمك.</p>
+          <h2>أهلاً بيك في Top Service</h2>
+          <p className="muted">اكتب رقم موبايلك وهنبعتلك كود تحقق من 6 أرقام في رسالة SMS.</p>
+          <p className="muted">لو انت عامل غسيل، ادخل برقمك اللي سجّله الأدمن.</p>
           <label>رقم الموبايل</label>
           <input
             type="tel"
@@ -517,15 +505,6 @@ export default function App() {
             {otpBusy ? 'بيبعت الكود…' : 'ابعت كود التحقق'}
           </button>
           {otpSent && <p className="muted">فاضل {otpLeft} من 3 طلبات كود في الساعة للرقم ده.</p>}
-          <button
-            className="link-btn"
-            onClick={() => {
-              setGate('role')
-              setOtpSent(false)
-            }}
-          >
-            ← تغيير الدور
-          </button>
           <div id="recaptcha-container" />
         </div>
       )}
@@ -574,7 +553,7 @@ export default function App() {
 
       {gate === 'profile' && pendingSession && (
         <div className="card">
-          <h2>{pendingSession.role === 'washer' ? 'استكمال بيانات الغسّال' : 'استكمال بياناتك'}</h2>
+          <h2>{pendingSession.role === 'washer' ? 'استكمال بيانات عامل الغسيل' : 'استكمال بياناتك'}</h2>
           <p className="muted">
             رقمك {pendingSession.phoneDisplay} اتأكد بنجاح ✅ — كمّل بياناتك عشان نبدأ.
           </p>
@@ -655,17 +634,30 @@ export default function App() {
       )}
 
       {gate === 'main' && session && session.role === 'customer' && (
-        <CustomerView session={session} compounds={compounds} onNotice={setNotice} onLogout={logout} />
+        <CustomerView
+          session={session}
+          compounds={compounds}
+          onNotice={setNotice}
+          onLogout={logout}
+          onSwitchToAdmin={switchToAdmin}
+        />
       )}
       {gate === 'main' && session && session.role === 'washer' && (
         <WasherView session={session} onNotice={setNotice} onLogout={logout} />
       )}
       {gate === 'main' && session && session.role === 'admin' && (
-        <AdminView session={session} compounds={compounds} onCompounds={setCompounds} onNotice={setNotice} onLogout={logout} />
+        <AdminView
+          session={session}
+          compounds={compounds}
+          onCompounds={setCompounds}
+          onNotice={setNotice}
+          onLogout={logout}
+          onSwitchToCustomer={switchToCustomer}
+        />
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 1</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 2</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -682,11 +674,13 @@ function CustomerView({
   compounds,
   onNotice,
   onLogout,
+  onSwitchToAdmin,
 }: {
   session: Session
   compounds: Compound[]
   onNotice: (m: string) => void
   onLogout: () => void
+  onSwitchToAdmin: () => void
 }) {
   const [tab, setTab] = useState<'home' | 'cars' | 'packages' | 'history' | 'profile'>('home')
   const [customer, setCustomer] = useState<Customer | null>(null)
@@ -934,7 +928,7 @@ function CustomerView({
     }
     await loadAll()
     onNotice(
-      `تم إرسال طلب الغسلة للعربية ${car.plate} ✅ — الغسّال هيغسلها في يوم جدول الكومباوند (${customer.compoundName})، وهتوصلك تأكيد لما تتم.`,
+      `تم إرسال طلب الغسلة للعربية ${car.plate} ✅ — عامل الغسيل هيغسلها في يوم جدول الكومباوند (${customer.compoundName})، وهتوصلك تأكيد لما تتم.`,
     )
   }
 
@@ -1078,7 +1072,7 @@ function CustomerView({
                   <>
                     {open ? (
                       <div className="notice" style={{ marginTop: 10 }}>
-                        ✅ طلب غسلة جاري للعربية دي (من {fmtDateTime(open.requestedAt)}) — الغسّال
+                        ✅ طلب غسلة جاري للعربية دي (من {fmtDateTime(open.requestedAt)}) — عامل الغسيل
                         هيغسلها في يوم جدول الكومباوند.
                         <div className="row">
                           <button
@@ -1113,7 +1107,7 @@ function CustomerView({
             <h3>📅 جدول الغسيل</h3>
             <p className="muted">
               الغسيل بيتم في أيام جدول الشركة الثابت لكل كومباوند — انت بتختار العربية بس،
-              والغسّال بييجي في يوم الجدول.
+              وعامل الغسيل بييجي في يوم الجدول.
               {customer?.compoundName
                 ? ` كومباوند ${customer.compoundName}: ${
                     compounds.find((c) => c.name === customer.compoundName)?.scheduleNote ||
@@ -1349,6 +1343,11 @@ function CustomerView({
           <button className="btn danger big" onClick={onLogout}>
             <LogoutIcon /> تسجيل خروج
           </button>
+          {session.phone === ADMIN_PHONE && (
+            <button className="btn big" onClick={onSwitchToAdmin}>
+              <ShieldIcon /> رجوع للوحة الأدمن
+            </button>
+          )}
         </div>
       )}
     </>
@@ -1356,7 +1355,7 @@ function CustomerView({
 }
 
 // ---------------------------------------------------------------------------
-//  واجهة الغسّال — عربيات اليوم + البحث الفوري + "تم الغسيل"
+//  واجهة عامل الغسيل — عربيات اليوم + البحث الفوري + "تم الغسيل"
 // ---------------------------------------------------------------------------
 
 function WasherView({
@@ -1408,7 +1407,7 @@ function WasherView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.phone])
 
-  /** طلبات اليوم الخاصة بالغسّال: كومباونداته المربوطة (لو مفيش ربط — كل الطلبات). */
+  /** طلبات اليوم الخاصة بعامل الغسيل: كومباونداته المربوطة (لو مفيش ربط — كل الطلبات). */
   const myRequests = useMemo(() => {
     if (washer && washer.compoundIds.length > 0) {
       return requests.filter((w) => washer.compoundIds.includes(w.compoundId))
@@ -1457,7 +1456,7 @@ function WasherView({
   async function markDone(w: WashRequest) {
     if (busyId) return
     setBusyId(w.id)
-    const r = await completeWash(w.id, session.name || 'غسّال', session.phone)
+    const r = await completeWash(w.id, session.name || 'عامل الغسيل', session.phone)
     setBusyId(null)
     if (!r.ok) {
       onNotice(r.message)
@@ -1601,12 +1600,14 @@ function AdminView({
   onCompounds,
   onNotice,
   onLogout,
+  onSwitchToCustomer,
 }: {
   session: Session
   compounds: Compound[]
   onCompounds: (c: Compound[]) => void
   onNotice: (m: string) => void
   onLogout: () => void
+  onSwitchToCustomer: () => void
 }) {
   const [tab, setTab] = useState<'dash' | 'customers' | 'payments' | 'today' | 'manage'>('dash')
   const [customers, setCustomers] = useState<Customer[]>([])
@@ -1623,7 +1624,7 @@ function AdminView({
   // إدارة: إضافة كومباوند
   const [newCompoundName, setNewCompoundName] = useState('')
   const [newCompoundSchedule, setNewCompoundSchedule] = useState('')
-  // إدارة: إضافة غسّال
+  // إدارة: إضافة عامل الغسيل
   const [newWasherName, setNewWasherName] = useState('')
   const [newWasherPhone, setNewWasherPhone] = useState('')
   const [newWasherCompounds, setNewWasherCompounds] = useState<string[]>([])
@@ -1793,16 +1794,16 @@ function AdminView({
   async function addWasher(e: FormEvent) {
     e.preventDefault()
     if (newWasherName.trim().length < 2) {
-      onNotice('اكتب اسم الغسّال.')
+      onNotice('اكتب اسم عامل الغسيل.')
       return
     }
     const e164 = toE164Phone(newWasherPhone)
     if (!e164) {
-      onNotice('رقم موبايل الغسّال غير صحيح — اكتب رقم مصري 11 رقم يبدأ بـ 01.')
+      onNotice('رقم موبايل عامل الغسيل غير صحيح — اكتب رقم مصري 11 رقم يبدأ بـ 01.')
       return
     }
     if (!isFirebaseConfigured) {
-      onNotice('Firebase غير مربوط — مينفعش نحفظ الغسّال.')
+      onNotice('Firebase غير مربوط — مينفعش نحفظ عامل الغسيل.')
       return
     }
     setBusyId('washer')
@@ -1815,14 +1816,14 @@ function AdminView({
     })
     setBusyId(null)
     if (!ok) {
-      onNotice('مقدرناش نحفظ الغسّال — حاول تاني.')
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ عامل الغسيل — حاول تاني.')
       return
     }
     setNewWasherName('')
     setNewWasherPhone('')
     setNewWasherCompounds([])
     await loadAll()
-    onNotice(`تمت إضافة الغسّال ${newWasherName.trim()} ✅ — هيدخل برقمه والـ OTP.`)
+    onNotice(`تمت إضافة عامل الغسيل ${newWasherName.trim()} ✅ — هيدخل برقمه والـ OTP.`)
   }
 
   function toggleWasherCompound(id: string) {
@@ -1905,6 +1906,9 @@ function AdminView({
               <ReceiptIcon /> في {pendingPayments.length} دفعة بانتظار تأكيدك — راجعهم
             </button>
           )}
+          <button className="btn big" onClick={onSwitchToCustomer}>
+            <CarIcon /> عرض التطبيق كعميل
+          </button>
           <button className="btn danger big" onClick={onLogout}>
             <LogoutIcon /> تسجيل خروج
           </button>
@@ -2106,7 +2110,7 @@ function AdminView({
             </form>
           </div>
           <div className="card">
-            <h2>الغسّالين ({washers.length})</h2>
+            <h2>عمال الغسيل ({washers.length})</h2>
             {washers.map((w) => (
               <div className="ride" key={w.phone}>
                 <b>
@@ -2123,15 +2127,15 @@ function AdminView({
               </div>
             ))}
             <form onSubmit={(e) => void addWasher(e)}>
-              <h3>إضافة غسّال</h3>
-              <label>اسم الغسّال</label>
+              <h3>إضافة عامل الغسيل</h3>
+              <label>اسم عامل الغسيل</label>
               <input
                 type="text"
                 placeholder="مثال: محمد أحمد"
                 value={newWasherName}
                 onChange={(e) => setNewWasherName(e.target.value)}
               />
-              <label>رقم موبايل الغسّال</label>
+              <label>رقم موبايل عامل الغسيل</label>
               <input
                 type="tel"
                 placeholder="01xxxxxxxxx"
@@ -2155,7 +2159,7 @@ function AdminView({
                 </label>
               ))}
               <button className="btn big" type="submit" disabled={busyId === 'washer'}>
-                <PlusIcon /> إضافة الغسّال
+                <PlusIcon /> إضافة عامل الغسيل
               </button>
             </form>
           </div>

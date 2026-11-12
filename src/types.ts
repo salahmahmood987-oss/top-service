@@ -117,7 +117,7 @@ export interface WashRequest {
   status: WashStatus
   requestedAt: number
   doneAt: number | null
-  /** مين اللي علّم "تم الغسيل": اسم الغسّال أو الأدمن */
+  /** مين اللي علّم "تم الغسيل": اسم عامل الغسيل أو الأدمن */
   doneBy: string | null
   doneByPhone: string | null
 }
@@ -125,7 +125,7 @@ export interface WashRequest {
 export interface Washer {
   phone: string
   name: string
-  /** الكومباوندات المربوطة بالغسّال — فاضية = يرى كل الطلبات */
+  /** الكومباوندات المربوطة بعامل الغسيل — فاضية = يرى كل الطلبات */
   compoundIds: string[]
   active: boolean
   createdAt: number

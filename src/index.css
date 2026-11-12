@@ -142,7 +142,7 @@ label { font-weight: 700; font-size: 14px; }
 .otp-row { display: flex; gap: 8px; justify-content: center; direction: ltr; margin: 16px 0 8px; }
 .otp-row input { width: 48px !important; height: 56px; text-align: center; font-size: 26px !important; font-weight: 800 !important; padding: 0 !important; }
 
-/* مجموعة الغسّال: عنوان الكومباوند/العمارة */
+/* مجموعة عامل الغسيل: عنوان الكومباوند/العمارة */
 .group-head { background: linear-gradient(180deg, #f5eef2, #efe3ea); border: 1px solid #e3cdd8; border-radius: 14px; padding: 10px 14px; margin: 16px 0 8px; font-weight: 800; color: var(--plum); box-shadow: var(--shadow-sm); }
 
 @media (max-width: 560px) { .tab { font-size: 13px; padding: 10px 4px; gap: 4px; } .tab .ic { width: 17px; height: 17px; } }
