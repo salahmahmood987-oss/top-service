@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v6)
+//  Top Service — المرحلة 1 (v7)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -53,6 +53,9 @@ import type { Session } from './store'
 import { preparePhotoForFirestore } from './imageUpload'
 import {
   ADMIN_PHONE,
+  COMPANY_PHONE,
+  COMPANY_PHONE_E164,
+  COMPANY_WHATSAPP_URL,
   PACKAGES,
   WEEKDAY_NAMES,
   fmtDate,
@@ -487,8 +490,24 @@ export default function App() {
         <h1>
           <span className="brand">Top Service</span>
         </h1>
+        <div className="contact-row" dir="ltr">
+          <a className="contact-number" href={`tel:${COMPANY_PHONE_E164}`}>
+            {COMPANY_PHONE}
+          </a>
+          <a
+            className="btn small whatsapp"
+            href={COMPANY_WHATSAPP_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            💬 واتساب
+          </a>
+          <a className="btn small" href={`tel:${COMPANY_PHONE_E164}`}>
+            📞 اتصال
+          </a>
+        </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 6 — المرحلة 1</span>
+        <span className="badge">الإصدار 7 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -668,7 +687,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 6</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 7</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}

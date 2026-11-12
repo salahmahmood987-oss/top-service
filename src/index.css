@@ -29,9 +29,14 @@ body { margin: 0; }
 /* الشعار والعنوان */
 .header { text-align: center; padding-top: 6px; }
 .logo-wide { width: 230px; max-width: 80%; height: auto; filter: drop-shadow(0 10px 18px rgba(92, 39, 70, 0.25)); }
-.header h1 { margin: 8px 0 2px; font-size: 30px; font-weight: 800; letter-spacing: -0.5px; text-shadow: 0 2px 0 rgba(255,255,255,.8), 0 4px 10px rgba(232, 118, 84, 0.25); }
-.header h1 .brand { background: linear-gradient(135deg, var(--amber), var(--orange) 55%, var(--orange-deep)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.header h1 { margin: 8px 0 2px; font-size: 34px; font-weight: 800; letter-spacing: -0.5px; }
+.header h1 .brand { color: var(--plum); }
 .tagline { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+/* صف التواصل في الترويسة: رقم الشركة + واتساب + اتصال */
+.contact-row { display: flex; gap: 8px; align-items: center; justify-content: center; margin: 6px 0 4px; flex-wrap: wrap; }
+.contact-row a { text-decoration: none; }
+.contact-number { font-weight: 800; font-size: 19px; letter-spacing: 1px; color: var(--plum); }
+.btn.whatsapp { background: linear-gradient(180deg, #4ade80, var(--green) 60%, var(--green-deep)); box-shadow: 0 1px 0 rgba(255,255,255,.45) inset, 0 -3px 0 rgba(20, 83, 45, 0.4) inset, 0 5px 12px rgba(22, 163, 74, 0.35); }
 .badge { display: inline-flex; align-items: center; gap: 6px; background: linear-gradient(135deg, #fdeee7, #fad9cb); border: 1px solid #f2b394; color: #8a3d24; border-radius: 999px; padding: 5px 14px; font-size: 13px; font-weight: 700; box-shadow: var(--shadow-sm); }
 
 /* أيقونات SVG */

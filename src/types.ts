@@ -9,6 +9,11 @@ export type Role = 'customer' | 'washer' | 'admin'
 /** رقم موبايل الأدمن (صلاح) — دور الأدمن مقفول على الرقم ده بس. */
 export const ADMIN_PHONE = '+201550364683'
 
+/** رقم تواصل الشركة الظاهر في الترويسة — واتساب ومكالمات. */
+export const COMPANY_PHONE = '01050015559'
+export const COMPANY_PHONE_E164 = '+201050015559'
+export const COMPANY_WHATSAPP_URL = 'https://wa.me/201050015559'
+
 export interface Customer {
   phone: string
   /** كود عميل ثابت لنفس رقم الموبايل، مثل C-1002 */
