@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  تنبيهات الدفع على الموبايل (v13) — إشعارات محلية على الجهاز نفسه،
+//  تنبيهات الدفع على الموبايل (v14) — إشعارات محلية على الجهاز نفسه،
 //  من غير سيرفر ومن غير Blaze: التطبيق بيحجز التذكير على الموبايل
 //  لما العميل يفتحه، والموبايل بيظهره في ميعاده حتى لو التطبيق مقفول.
 //  الشرط الوحيد: العميل يكون فتح التطبيق مرة في الشهر عشان التذكير يتحجز.
@@ -11,6 +11,10 @@ import type { Payment } from './types'
 
 const PERM_KEY = 'ts-notif-perm'
 const TITLE = 'Top Service — تذكير بالدفع'
+/** الساعة 6 مساءً كل يوم — ميعاد التذكير اليومي للي مدفعوش. */
+const REMIND_HOUR = 18
+/** أقصى عدد خانات تذكير لدفعة: (31-25+1) + 5 = 12 خانة. */
+const MAX_SLOTS = 12
 
 /** رقم إشعار ثابت ومستقر: هاش صغير من معرّف الدفعة + رقم الخانة،
  *  عشان إعادة الجدولة تستبدل بدل ما تكرّر. */
@@ -22,12 +26,12 @@ function notificationId(paymentId: string, slot: number): number {
 }
 
 function slotIds(paymentId: string): number[] {
-  return [0, 1, 2].map((slot) => notificationId(paymentId, slot))
+  // إلغاء خانات مش موجودة أصلاً عادي (no-op) — فبنلغي الحد الأقصى دايماً
+  return Array.from({ length: MAX_SLOTS }, (_, slot) => notificationId(paymentId, slot))
 }
 
-/** مواعيد التذكير الثلاثة لدفعة ما — كلها الساعة 10:00 صباحاً بتوقيت الموبايل:
- *  (0) يوم 25 من شهر الدفعة، (1) آخر يوم في شهر الدفعة،
- *  (2) يوم 5 من الشهر اللي بعده (آخر يوم في فترة السماح).
+/** مواعيد التذكير لدفعة ما — كل يوم الساعة 6 مساءً، من يوم 25
+ *  لآخر الشهر + أول 5 أيام من الشهر اللي بعده (فترة السماح).
  *  شهر الدفعة من createdAt — نفس منطق paymentCollectionStatus. */
 function reminderSlots(payment: Payment): { at: Date; body: string }[] {
   const created = new Date(payment.createdAt)
@@ -35,20 +39,23 @@ function reminderSlots(payment: Payment): { at: Date; body: string }[] {
   const m = created.getMonth()
   const lastDay = new Date(y, m + 1, 0).getDate()
   const amount = payment.amount
-  return [
-    {
-      at: new Date(y, m, 25, 10, 0, 0),
+  const slots: { at: Date; body: string }[] = []
+  for (let day = 25; day <= lastDay; day++) {
+    slots.push({
+      at: new Date(y, m, day, REMIND_HOUR, 0, 0),
       body: `لسه عليك ${amount} جنيه — ادفع الآن.`,
-    },
-    {
-      at: new Date(y, m, lastDay, 10, 0, 0),
-      body: `لسه عليك ${amount} جنيه — ادفع الآن.`,
-    },
-    {
-      at: new Date(y, m + 1, 5, 10, 0, 0),
-      body: `لسه عليك ${amount} جنيه — النهاردة آخر يوم في فترة السماح، ادفع الآن.`,
-    },
-  ]
+    })
+  }
+  for (let day = 1; day <= 5; day++) {
+    slots.push({
+      at: new Date(y, m + 1, day, REMIND_HOUR, 0, 0),
+      body:
+        day === 5
+          ? `لسه عليك ${amount} جنيه — النهاردة آخر يوم في فترة السماح، ادفع الآن.`
+          : `لسه عليك ${amount} جنيه — ادفع الآن.`,
+    })
+  }
+  return slots
 }
 
 /** إذن الإشعارات: بيُطلب مرة واحدة بس لما يكون فيه دفعة مستحقة،
