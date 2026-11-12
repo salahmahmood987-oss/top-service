@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v14)
+//  Top Service — المرحلة 1 (v15)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -114,6 +114,15 @@ function norm(s: string): string {
     .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
     .replace(/[\s\-_]/g, '')
     .toLowerCase()
+}
+
+/** أشكال رقم التليفون للبحث: الدولي (+2015...) والمحلي (0155...) —
+ *  عشان البحث برقم 0155 يلاقي العميل حتى لو رقمه متخزن بصيغة +20. */
+function phoneSearchForms(phone: string): string[] {
+  const digits = norm(phone).replace(/^\+/, '')
+  const forms = [norm(phone), digits]
+  if (digits.startsWith('20') && digits.length > 2) forms.push('0' + digits.slice(2))
+  return forms
 }
 
 function todayStart(): number {
@@ -515,7 +524,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 14 — المرحلة 1</span>
+        <span className="badge">الإصدار 15 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -697,7 +706,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 14</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 15</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -740,6 +749,12 @@ function CustomerView({
   const [subCarId, setSubCarId] = useState<string | null>(null)
   const [subPkg, setSubPkg] = useState<4 | 8 | 12>(4)
   const [subMethod, setSubMethod] = useState<PaymentMethod>('cash')
+  // معالج الاشتراك الموجَّه (v15): كومباوند ← نموذج ← عدد الغسلات
+  const [wizStep, setWizStep] = useState<1 | 2 | 3>(1)
+  const [wizCompoundId, setWizCompoundId] = useState<string | null>(null)
+  const [wizPhaseId, setWizPhaseId] = useState<string | null>(null)
+  const [wizBuilding, setWizBuilding] = useState('')
+  const [wizApartment, setWizApartment] = useState('')
   const [washBusy, setWashBusy] = useState<string | null>(null)
 
   const loadAll = async () => {
@@ -883,6 +898,29 @@ function CustomerView({
     onNotice('تمت إضافة العربية ✅ — اختار لها باقة من تبويب "باقاتي" عشان تبدأ الغسيل.')
   }
 
+  /** فتح معالج الاشتراك لعربية: الخطوة 1، والكومباوند والعمارة والشقة
+   *  متعبّية من ملف العميل لو موجودة. */
+  function openWizard(carId: string) {
+    setSubCarId(carId)
+    setSubPkg(4)
+    setSubMethod('cash')
+    setWizStep(1)
+    setWizCompoundId(customer?.compoundId ?? null)
+    setWizPhaseId(null)
+    setWizBuilding(customer?.building ?? '')
+    setWizApartment(customer?.apartment ?? '')
+  }
+
+  /** إغلاق المعالج وتصفير حالته. */
+  function closeWizard() {
+    setSubCarId(null)
+    setWizStep(1)
+    setWizCompoundId(null)
+    setWizPhaseId(null)
+    setWizBuilding('')
+    setWizApartment('')
+  }
+
   async function subscribeCar() {
     if (!subCarId) return
     const car = cars.find((c) => c.id === subCarId)
@@ -904,6 +942,45 @@ function CustomerView({
       return
     }
     setBusy(true)
+    // خطوات المعالج قبل الاشتراك نفسه: حدّث الكومباوند والعمارة والشقة
+    // في ملف العميل، واربط العربية بالنموذج اللي اختاره.
+    const wizCompound = compounds.find((c) => c.id === wizCompoundId)
+    if (!wizCompound || !wizPhaseId) {
+      setBusy(false)
+      onNotice('كمّل خطوات الاشتراك الأول — اختار الكومباوند والنموذج.')
+      return
+    }
+    const newBuilding = wizBuilding.trim()
+    const newApartment = wizApartment.trim()
+    if (!newBuilding || !newApartment) {
+      setBusy(false)
+      onNotice('اكتب رقم العمارة والشقة.')
+      return
+    }
+    if (
+      !customer ||
+      wizCompoundId !== customer.compoundId ||
+      newBuilding !== customer.building ||
+      newApartment !== customer.apartment
+    ) {
+      const okProfile = await saveDoc('customers', session.phone, {
+        compoundId: wizCompound.id,
+        compoundName: wizCompound.name,
+        building: newBuilding,
+        apartment: newApartment,
+      })
+      if (!okProfile) {
+        setBusy(false)
+        onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ بياناتك — حاول تاني.')
+        return
+      }
+    }
+    const okPhase = await saveDoc('cars', car.id, { phaseId: wizPhaseId })
+    if (!okPhase) {
+      setBusy(false)
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ النموذج — حاول تاني.')
+      return
+    }
     const now = Date.now()
     const startDay = new Date(now).getDate()
     // الشهر الأول بيتحسب من يوم الاشتراك (مثال: باقة 200 يوم 15 → 100)،
@@ -946,7 +1023,7 @@ function CustomerView({
       onNotice('مقدرناش نسجّل الاشتراك — تأكد إن النت شغال وحاول تاني.')
       return
     }
-    setSubCarId(null)
+    closeWizard()
     await loadAll()
     onNotice(
       `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${dueAmount} جنيه${startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}، والتحصيل من يوم 25 لآخر الشهر + 5 أيام سماح.`,
@@ -1209,6 +1286,9 @@ function CustomerView({
             const duePay = active ? duePaymentFor(active.id) : undefined
             const paidPay = active ? paidPaymentFor(active.id) : undefined
             const past = subs.filter((s) => s.carId === car.id).slice(0, 3)
+            const wizCompound = compounds.find((c) => c.id === wizCompoundId)
+            const wizPhases = wizCompound?.phases ?? []
+            const wizPhase = wizPhases.find((p) => p.id === wizPhaseId)
             return (
               <div className="ride" key={car.id}>
                 <b>
@@ -1230,9 +1310,8 @@ function CustomerView({
                 <button
                   className="btn small"
                   onClick={() => {
-                    setSubCarId(subCarId === car.id ? null : car.id)
-                    setSubPkg(4)
-                    setSubMethod('cash')
+                    if (subCarId === car.id) closeWizard()
+                    else openWizard(car.id)
                   }}
                   disabled={!!active}
                 >
@@ -1240,34 +1319,142 @@ function CustomerView({
                 </button>
                 {subCarId === car.id && (
                   <div style={{ marginTop: 12 }}>
-                    <label>اختار الباقة</label>
-                    {PACKAGES.map((p) => (
-                      <div
-                        key={p.id}
-                        className={`pkg${subPkg === p.id ? ' selected' : ''}`}
-                        onClick={() => setSubPkg(p.id)}
-                      >
-                        <div className="row" style={{ justifyContent: 'space-between' }}>
-                          <span className="pkg-washes">باقة {p.washes} غسلات / شهر</span>
-                          <span className="pkg-price">{p.price} جنيه</span>
+                    <p className="muted">خطوة {wizStep} من 3</p>
+                    {wizStep === 1 && (
+                      <>
+                        <label>اختار الكومباوند</label>
+                        {compounds.length === 0 && (
+                          <p className="muted">
+                            لسه مفيش كومباوندات — كلم الشركة على {COMPANY_PHONE}.
+                          </p>
+                        )}
+                        {compounds.map((c) => (
+                          <div
+                            key={c.id}
+                            className={`pkg${wizCompoundId === c.id ? ' selected' : ''}`}
+                            onClick={() => {
+                              setWizCompoundId(c.id)
+                              setWizPhaseId(null)
+                            }}
+                          >
+                            <div className="row" style={{ justifyContent: 'space-between' }}>
+                              <span className="pkg-washes">{c.name}</span>
+                              {wizCompoundId === c.id && <span>✅</span>}
+                            </div>
+                          </div>
+                        ))}
+                        <label>رقم العمارة</label>
+                        <input
+                          type="text"
+                          value={wizBuilding}
+                          onChange={(e) => setWizBuilding(e.target.value)}
+                          placeholder="مثال: A10"
+                        />
+                        <label>رقم الشقة</label>
+                        <input
+                          type="text"
+                          value={wizApartment}
+                          onChange={(e) => setWizApartment(e.target.value)}
+                          placeholder="مثال: 5"
+                        />
+                        <button
+                          className="btn big"
+                          onClick={() => {
+                            if (!wizBuilding.trim() || !wizApartment.trim()) {
+                              onNotice('اكتب رقم العمارة والشقة.')
+                              return
+                            }
+                            setWizStep(2)
+                          }}
+                          disabled={!wizCompoundId}
+                        >
+                          التالي
+                        </button>
+                      </>
+                    )}
+                    {wizStep === 2 && (
+                      <>
+                        <label>اختار النموذج</label>
+                        {wizPhases.length === 0 ? (
+                          <p className="muted">
+                            لسه مفيش نماذج للكومباوند ده — كلم الشركة على {COMPANY_PHONE}.
+                          </p>
+                        ) : (
+                          wizPhases.map((p) => (
+                            <div
+                              key={p.id}
+                              className={`pkg${wizPhaseId === p.id ? ' selected' : ''}`}
+                              onClick={() => setWizPhaseId(p.id)}
+                            >
+                              <div className="row" style={{ justifyContent: 'space-between' }}>
+                                <span className="pkg-washes">النموذج: {p.name}</span>
+                                {wizPhaseId === p.id && <span>✅</span>}
+                              </div>
+                              <div className="muted">{phaseDaysLabel(p.days)}</div>
+                            </div>
+                          ))
+                        )}
+                        <div className="row">
+                          <button className="btn small" onClick={() => setWizStep(1)}>
+                            رجوع
+                          </button>
+                          <button
+                            className="btn big"
+                            onClick={() => setWizStep(3)}
+                            disabled={!wizPhaseId || wizPhases.length === 0}
+                          >
+                            التالي
+                          </button>
                         </div>
-                        <div className="muted">
-                          {Math.round(p.price / p.washes)} جنيه للغسلة الواحدة
+                      </>
+                    )}
+                    {wizStep === 3 && (
+                      <>
+                        <p className="muted">
+                          الكومباوند: <b>{wizCompound?.name}</b> — النموذج:{' '}
+                          <b>
+                            {wizPhase?.name} ({phaseDaysLabel(wizPhase?.days ?? [])})
+                          </b>
+                        </p>
+                        <label>اختار عدد الغسلات</label>
+                        {PACKAGES.map((p) => (
+                          <div
+                            key={p.id}
+                            className={`pkg${subPkg === p.id ? ' selected' : ''}`}
+                            onClick={() => setSubPkg(p.id)}
+                          >
+                            <div className="row" style={{ justifyContent: 'space-between' }}>
+                              <span className="pkg-washes">باقة {p.washes} غسلات / شهر</span>
+                              <span className="pkg-price">{p.price} جنيه</span>
+                            </div>
+                            <div className="muted">
+                              {Math.round(p.price / p.washes)} جنيه للغسلة الواحدة
+                            </div>
+                          </div>
+                        ))}
+                        <label>طريقة الدفع (التحصيل من يوم 25)</label>
+                        <select
+                          value={subMethod}
+                          onChange={(e) => setSubMethod(e.target.value as PaymentMethod)}
+                        >
+                          <option value="cash">نقدي (تحصيل عند الباب)</option>
+                          <option value="visa">فيزا</option>
+                          <option value="wallet">محفظة إلكترونية</option>
+                        </select>
+                        <div className="row">
+                          <button className="btn small" onClick={() => setWizStep(2)}>
+                            رجوع
+                          </button>
+                          <button
+                            className="btn big"
+                            onClick={() => void subscribeCar()}
+                            disabled={busy}
+                          >
+                            {busy ? 'بيسجّل…' : 'تأكيد الاشتراك'}
+                          </button>
                         </div>
-                      </div>
-                    ))}
-                    <label>طريقة الدفع (التحصيل من يوم 25)</label>
-                    <select
-                      value={subMethod}
-                      onChange={(e) => setSubMethod(e.target.value as PaymentMethod)}
-                    >
-                      <option value="cash">نقدي (تحصيل عند الباب)</option>
-                      <option value="visa">فيزا</option>
-                      <option value="wallet">محفظة إلكترونية</option>
-                    </select>
-                    <button className="btn big" onClick={() => void subscribeCar()} disabled={busy}>
-                      {busy ? 'بيسجّل…' : `تأكيد الاشتراك — ${packageById(subPkg).price} جنيه`}
-                    </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -1927,9 +2114,11 @@ function AdminView({
       const carsOf = allCars.filter((car) => car.customerPhone === c.phone)
       const hay = [
         norm(c.name),
-        norm(c.phone),
+        ...phoneSearchForms(c.phone),
         norm(c.code),
         norm(c.compoundName),
+        norm(c.building ?? ''),
+        norm(c.apartment ?? ''),
         ...carsOf.flatMap((car) => [norm(car.plate), norm(car.type)]),
       ].join(' ')
       return hay.includes(q)
@@ -2376,7 +2565,7 @@ function AdminView({
             <SearchIcon />
             <input
               type="text"
-              placeholder="ابحث بالاسم أو التليفون أو اللوحة أو الكومباوند…"
+              placeholder="ابحث بالاسم أو التليفون أو اللوحة أو رقم العمارة أو الكومباوند…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -2392,7 +2581,7 @@ function AdminView({
                   <div style={{ flex: 1 }}>
                     <b>{c.name}</b>
                     <div className="muted">
-                      {c.phone} — {c.code}
+                      📞 {c.phone} — {c.code}
                     </div>
                     <div className="muted">
                       {c.compoundName} — عمارة {c.building} — شقة {c.apartment}
