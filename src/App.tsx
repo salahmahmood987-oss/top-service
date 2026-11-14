@@ -1,18 +1,22 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v18)
+//  Top Service — المرحلة 1 (v20)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
 //  الغسيل بجدول مراحل ثابت: الأدمن بيحدد مراحل كل كومباوند (مجموعة أيام
 //  أسبوع) ويربط كل عربية بمرحلة — العميل مبيطلبش غسلة، وعامل الغسيل
 //  بيشوف عربيات النهاردة بس ويعلّم "تم الغسيل" (مع صورة اختيارية كإثبات).
+//  الدفع الأونلاين (v20 — Kashier، وضع اختبار): زرار "ادفع أونلاين" في
+//  تذكير الدفع بيفتح صفحة Kashier، والتحقق بيتم عن طريق Worker.
 //  لا توجد بيانات وهمية — كل رقم من Firestore (أو حالة "غير مربوط" صادقة).
 //  الأخطاء والرسائل في مودال وسط الشاشة، وليست شريطاً علوياً.
 // ---------------------------------------------------------------------------
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { Browser } from '@capacitor/browser'
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera'
 import { Capacitor } from '@capacitor/core'
+import type { PluginListenerHandle } from '@capacitor/core'
 import { where } from 'firebase/firestore'
 import logoTransparent from './assets/logo-top-services-transparent.png'
 import { isFirebaseConfigured } from './firebaseConfig'
@@ -50,6 +54,11 @@ import {
   subscribeCollection,
 } from './firebaseDb'
 import { sendOtpCode, toE164Phone, verifyOtpCode } from './otp'
+import {
+  createKashierSession,
+  isKashierConfigured,
+  verifyKashierSession,
+} from './kashier'
 import { clearSession, loadSession, saveSession } from './store'
 import type { Session } from './store'
 import { preparePhotoForFirestore } from './imageUpload'
@@ -532,7 +541,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 19 — المرحلة 1</span>
+        <span className="badge">الإصدار 20 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -717,7 +726,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 19</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 20</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -772,6 +781,10 @@ function CustomerView({
   const [wizBuilding, setWizBuilding] = useState('')
   const [wizApartment, setWizApartment] = useState('')
   const [washBusy, setWashBusy] = useState<string | null>(null)
+  // الدفع الأونلاين (v20 — Kashier، وضع اختبار): دفعة واحدة جارية في المرة
+  const [payBusy, setPayBusy] = useState<string | null>(null)
+  /** جلسة دفع مفتوحة في المتصفح — بنتحقق منها لما التبويب يتقفل */
+  const pendingPayRef = useRef<{ paymentId: string; sessionId: string } | null>(null)
 
   const loadAll = async () => {
     const [c, cs, ss, ps, hs] = await Promise.all([
@@ -840,6 +853,24 @@ function CustomerView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payments])
 
+  // لما العميل يقفل تبويب الدفع ويرجع للتطبيق، نتحقق من الجلسة.
+  // الـ ref بيضمن إن المستمع (المتسجل مرة واحدة) بينادي أحدث نسخة من
+  // دالة التحقق — مش نسخة قديمة من أول render.
+  const verifyPendingRef = useRef(verifyPendingPayment)
+  verifyPendingRef.current = verifyPendingPayment
+  useEffect(() => {
+    let handle: PluginListenerHandle | null = null
+    void Browser.addListener('browserFinished', () => {
+      void verifyPendingRef.current()
+    }).then((h) => {
+      handle = h
+    })
+    return () => {
+      void handle?.remove()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   function activeSubFor(carId: string): Subscription | undefined {
     return subs.find((s) => s.carId === carId && isSubscriptionActive(s))
   }
@@ -872,6 +903,67 @@ function CustomerView({
         {startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}
       </div>
     )
+  }
+
+  /** التحقق من جلسة دفع بعد ما العميل يرجع من صفحة Kashier — المصدر
+   *  الوحيد للحقيقة هو الـ Worker (بيسأل Kashier نفسه عن حالة الجلسة).
+   *  لو الدفع ناجح، بنأكد التحصيل بنفس دالة تأكيد التحصيل (إيصال TS-…).
+   *  v20 — وضع اختبار بس: مفيش فلوس حقيقية بتتحرك. */
+  async function verifyPendingPayment(): Promise<void> {
+    const pending = pendingPayRef.current
+    if (!pending) return
+    pendingPayRef.current = null
+    setPayBusy(pending.paymentId)
+    const res = await verifyKashierSession(pending.sessionId)
+    if (!res.ok) {
+      setPayBusy(null)
+      onNotice(res.message ?? 'مقدرناش نتحقق من الدفع — حاول تاني.')
+      return
+    }
+    if (!res.paid) {
+      setPayBusy(null)
+      onNotice('الدفع لسه مكتملش — تقدر تحاول تاني من زرار "ادفع أونلاين".')
+      return
+    }
+    const done = await confirmCollection(pending.paymentId)
+    setPayBusy(null)
+    if (!done.ok) {
+      onNotice(done.message)
+      return
+    }
+    await loadAll()
+    onNotice(`تم الدفع أونلاين ✅ — ${done.message}`)
+  }
+
+  /** الدفع الأونلاين لدفعة مستحقة: جلسة Kashier ← صفحة الدفع في المتصفح
+   *  ← التحقق لما التبويب يتقفل. لو فيه جلسة قديمة لنفس الدفعة لسه
+   *  مفتوحة، بنتحقق منها الأول بدل ما نعمل جلسة جديدة (عشان العميل
+   *  ميدفعش مرتين بالغلط). */
+  async function payOnline(p: Payment): Promise<void> {
+    if (payBusy) return
+    if (!isKashierConfigured()) {
+      onNotice('الدفع الأونلاين لسه متركبش في التطبيق.')
+      return
+    }
+    if (pendingPayRef.current?.paymentId === p.id) {
+      await verifyPendingPayment()
+      return
+    }
+    setPayBusy(p.id)
+    const created = await createKashierSession(p.id, p.amount, session.phone)
+    if (!created.ok || !created.sessionUrl || !created.sessionId) {
+      setPayBusy(null)
+      onNotice(created.message ?? 'مقدرناش نجهّز الدفع دلوقتي — حاول تاني.')
+      return
+    }
+    pendingPayRef.current = { paymentId: p.id, sessionId: created.sessionId }
+    setPayBusy(null)
+    try {
+      await Browser.open({ url: created.sessionUrl })
+    } catch {
+      pendingPayRef.current = null
+      onNotice('مقدرناش نفتح صفحة الدفع — حاول تاني.')
+    }
   }
 
   async function addCar(e: FormEvent) {
@@ -1167,9 +1259,21 @@ function CustomerView({
             .filter((x) => x.status !== 'not-yet')
             .map(({ p, status }) => (
               <div key={p.id} className={`remind${status === 'overdue' ? ' overdue' : ''}`}>
-                {status === 'open' && `⚠️ لسه عليك ${p.amount} جنيه — ادفع الآن.`}
-                {status === 'grace' && `⚠️ لسه عليك ${p.amount} جنيه — ادفع الآن.`}
-                {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر — ادفع الآن.`}
+                <div>
+                  {status === 'open' && `⚠️ لسه عليك ${p.amount} جنيه.`}
+                  {status === 'grace' && `⚠️ لسه عليك ${p.amount} جنيه.`}
+                  {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر.`}
+                </div>
+                {isKashierConfigured() && (
+                  <button
+                    className="btn"
+                    style={{ marginTop: 10 }}
+                    disabled={payBusy === p.id}
+                    onClick={() => void payOnline(p)}
+                  >
+                    {payBusy === p.id ? 'جارٍ تجهيز الدفع…' : '💳 ادفع أونلاين'}
+                  </button>
+                )}
               </div>
             ))}
           {cars.map((car) => {
