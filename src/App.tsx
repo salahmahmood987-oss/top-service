@@ -339,7 +339,7 @@ export default function App() {
 
   async function confirmCode() {
     setOtpBusy(true)
-    const r = await verifyOtpCode(otpCode)
+    const r = await verifyOtpCode(otpCode, phoneInput)
     setOtpBusy(false)
     if (!r.ok) {
       setNotice(r.message)
@@ -532,7 +532,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 18 — المرحلة 1</span>
+        <span className="badge">الإصدار 19 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -717,7 +717,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 18</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 19</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}

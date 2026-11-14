@@ -24,14 +24,62 @@ import {
   PhoneAuthProvider,
   RecaptchaVerifier,
   signInWithCredential,
+  signInWithCustomToken,
   signInWithPhoneNumber,
 } from 'firebase/auth'
 import type { ConfirmationResult } from 'firebase/auth'
 import { getFirebaseAuth } from './firebaseApp'
 import { isFirebaseConfigured } from './firebaseConfig'
+import {
+  isOtpWorkerConfigured,
+  requestOtpFromWorker,
+  verifyOtpWithWorker,
+} from './otpWorker'
+import type { WorkerOtpResponse, WorkerVerifyResponse } from './otpWorker'
 import { ADMIN_PHONE, OTP_MAX_PER_HOUR } from './types'
 
 const OTP_KEY = 'topservice_otp_v1'
+
+/**
+ * أرقام صلاح — من غير حد إرسال (بتاعته، بيجرّب بيها كتير):
+ * معفية من حد التطبيق المحلي (3/ساعة) ومن حد الـ Worker كمان —
+ * الـ Worker فيه نفس القايمة، عدّل الاتنين مع بعض.
+ */
+const UNLIMITED_NUMBERS = new Set([ADMIN_PHONE, '+201515149075'])
+
+/** يحوّل خطأ إرسال الـ Worker لرسالة عربية واضحة. */
+function workerSendErrorMessage(w: WorkerOtpResponse): string {
+  switch (w.error) {
+    case 'rate_limited':
+      return (
+        w.message || 'وصلت للحد الأقصى — 3 أكواد بس في الساعة للرقم ده.'
+      )
+    case 'sms_quota':
+    case 'daily_cap':
+      return 'خلصت رسايل التحقق المسموحة لليوم — حاول بكرة.'
+    case 'sms_failed':
+    case 'network':
+      return 'مقدرناش نبعت الكود دلوقتي — حاول تاني بعد شوية.'
+    default:
+      return w.message || 'مقدرناش نبعت الكود دلوقتي — حاول تاني بعد شوية.'
+  }
+}
+
+/** يحوّل خطأ تأكيد الـ Worker لرسالة عربية واضحة. */
+function workerVerifyErrorMessage(w: WorkerVerifyResponse): string {
+  switch (w.error) {
+    case 'invalid_code':
+      return w.message || 'الكود غلط — راجع الرسالة وحاول تاني.'
+    case 'code_expired':
+      return w.message || 'الكود انتهت صلاحيته — اطلب كود جديد.'
+    case 'too_many_attempts':
+      return w.message || 'محاولات كتير غلط — اطلب كود جديد.'
+    case 'network':
+      return 'مشكلة في الاتصال بسيرفر الأكواد — تأكد إن النت شغال وحاول تاني.'
+    default:
+      return w.message || 'الكود غلط — راجع الرسالة وحاول تاني.'
+  }
+}
 
 /** أوقات طلبات الكود في آخر ساعة (timestamps) لكل رقم — حد التطبيق فقط. */
 interface OtpRateRecord {
@@ -267,12 +315,12 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
   }
 
   // حد التطبيق: 3 في الساعة لكل رقم (قبل Firebase)
-  // الأدمن معفي من الحد — يبعت أي عدد من الأكواد (recent فاضية دايماً له)
-  const isAdmin = e164 === ADMIN_PHONE
+  // أرقام صلاح معفية من الحد — تبعت أي عدد من الأكواد (recent فاضية دايماً لها)
+  const unlimited = UNLIMITED_NUMBERS.has(e164)
   const now = Date.now()
   const records = load()
   const rec = records[phone] || { requests: [] }
-  const recent = isAdmin ? [] : pruneRequests(rec.requests, now)
+  const recent = unlimited ? [] : pruneRequests(rec.requests, now)
   if (recent.length >= OTP_MAX_PER_HOUR) {
     const oldest = Math.min(...recent)
     const waitMs = 60 * 60 * 1000 - (now - oldest)
@@ -284,6 +332,38 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
       remaining: 0,
       waitMinutes,
       message: `وصلت للحد الأقصى — 3 أكواد بس في الساعة للرقم ده. استنى ${waitMinutes} دقيقة وحاول تاني.`,
+    }
+  }
+
+  // --- الكود SMS عن طريق textbee (Worker) — المسار الأساسي ---
+  // الـ Worker بيولّد الكود ويبعت الـ SMS وبيفرض حد 3/ساعة من عنده كمان.
+  // أرقام الاختبار (123456) بيتعامل معاها الـ Worker من غير SMS.
+  // حد التطبيق المحلي اللي فوق يفضل خط دفاع أول، والتسجيل في
+  // localStorage يتم بعد نجاح الإرسال بس (كما هو في مسار Firebase).
+  if (isOtpWorkerConfigured()) {
+    const w = await requestOtpFromWorker(e164)
+    if (!w.ok) {
+      return {
+        ok: false,
+        remaining: OTP_MAX_PER_HOUR - recent.length,
+        waitMinutes: w.waitMinutes,
+        message: workerSendErrorMessage(w),
+      }
+    }
+    if (!unlimited) {
+      records[phone] = { requests: [...recent, now] }
+      save(records)
+    }
+    const remaining = unlimited ? OTP_MAX_PER_HOUR : OTP_MAX_PER_HOUR - recent.length - 1
+    return {
+      ok: true,
+      e164,
+      remaining,
+      message:
+        w.message ||
+        (unlimited
+          ? `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام).`
+          : `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام). فاضل ${remaining} من 3 طلبات في الساعة.`),
     }
   }
 
@@ -324,11 +404,11 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
       }
     }
     // سجّل الطلب بعد الإرسال الناجح بس (مش على الفشل) — الأدمن مبيتسجّلش أصلاً
-    if (!isAdmin) {
+    if (!unlimited) {
       records[phone] = { requests: [...recent, now] }
       save(records)
     }
-    const remaining = OTP_MAX_PER_HOUR - recent.length - 1
+    const remaining = unlimited ? OTP_MAX_PER_HOUR : OTP_MAX_PER_HOUR - recent.length - 1
     if (outcome.kind === 'completed') {
       // تحقق فوري: Firebase أكّد الرقم وسجّل الدخول بدون SMS
       nativeVerificationId = null
@@ -345,7 +425,9 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
       ok: true,
       e164,
       remaining,
-      message: `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام). فاضل ${remaining} من 3 طلبات في الساعة.`,
+      message: unlimited
+        ? `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام).`
+        : `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام). فاضل ${remaining} من 3 طلبات في الساعة.`,
     }
   }
 
@@ -365,16 +447,18 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
     confirmation = await signInWithPhoneNumber(auth, e164, verifier)
 
     // سجّل الطلب بعد الإرسال الناجح بس (مش على الفشل) — الأدمن مبيتسجّلش أصلاً
-    if (!isAdmin) {
+    if (!unlimited) {
       records[phone] = { requests: [...recent, now] }
       save(records)
     }
-    const remaining = OTP_MAX_PER_HOUR - recent.length - 1
+    const remaining = unlimited ? OTP_MAX_PER_HOUR : OTP_MAX_PER_HOUR - recent.length - 1
     return {
       ok: true,
       e164,
       remaining,
-      message: `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام). فاضل ${remaining} من 3 طلبات في الساعة.`,
+      message: unlimited
+        ? `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام).`
+        : `الكود اتبعت في رسالة SMS على ${e164} — اكتب الكود اللي وصلك (6 أرقام). فاضل ${remaining} من 3 طلبات في الساعة.`,
     }
   } catch (e) {
     console.warn('Firebase Phone Auth send failed:', e)
@@ -391,10 +475,36 @@ export async function sendOtpCode(phone: string): Promise<OtpSendResult> {
 /** يتأكد من الكود اللي وصلك في رسالة SMS (6 أرقام). */
 export async function verifyOtpCode(
   input: string,
+  phone?: string,
 ): Promise<{ ok: boolean; message: string }> {
   const code = normalizeDigits(input.trim())
   if (!/^\d{6}$/.test(code)) {
     return { ok: false, message: 'الكود 6 أرقام — اكتب الكود اللي وصلك في رسالة SMS.' }
+  }
+  // --- مسار الـ Worker: الكود اتبعت عن طريق textbee ---
+  // يتفرع هنا بس لو مفيش حالة Firebase معلّقة.
+  const e164 = phone ? toE164Phone(phone) : null
+  if (
+    e164 &&
+    isOtpWorkerConfigured() &&
+    !nativeVerificationId &&
+    !confirmation
+  ) {
+    const w = await verifyOtpWithWorker(e164, code)
+    if (!w.ok) {
+      return { ok: false, message: workerVerifyErrorMessage(w) }
+    }
+    const auth = getFirebaseAuth()
+    if (!auth || !w.customToken) {
+      return { ok: false, message: 'مقدرناش نكمل الدخول — حاول تاني.' }
+    }
+    try {
+      await signInWithCustomToken(auth, w.customToken)
+      return { ok: true, message: 'تم تأكيد رقمك بنجاح.' }
+    } catch (e) {
+      console.warn('Worker custom token sign-in failed:', e)
+      return { ok: false, message: 'مقدرناش نكمل الدخول — حاول تاني.' }
+    }
   }
   // --- أندرويد: تأكيد الكود ---
   // الجسر (v3): الكود اتبعت من الإضافة الأصلية (verificationId أصلي)،
@@ -457,9 +567,10 @@ export async function verifyOtpCode(
   }
 }
 
-/** كم طلب كود فاضل للرقم ده في الساعة الحالية؟ الأدمن دايماً عنده الحد كامل. */
+/** كم طلب كود فاضل للرقم ده في الساعة الحالية؟ أرقام صلاح دايماً عندها الحد كامل. */
 export function otpRemaining(phone: string): number {
-  if (toE164Phone(phone) === ADMIN_PHONE) return OTP_MAX_PER_HOUR
+  const e164 = toE164Phone(phone)
+  if (e164 && UNLIMITED_NUMBERS.has(e164)) return OTP_MAX_PER_HOUR
   const rec = load()[phone.trim()]
   if (!rec) return OTP_MAX_PER_HOUR
   return Math.max(
