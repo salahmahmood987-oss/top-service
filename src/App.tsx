@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v23)
+//  Top Service — المرحلة 1 (v24)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -636,7 +636,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 23 — المرحلة 1</span>
+        <span className="badge">الإصدار 24 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -821,7 +821,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 23</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 24</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -1404,14 +1404,16 @@ function CustomerView({
               </button>
             </div>
           )}
-          {/* تذكير بالدفع — بيظهر من يوم 25 بس، للدفعات اللي لسه متدفعتش */}
+          {/* الدفعات المستحقة — الزرارين ظاهرين دايماً (v24) عشان العميل
+           *  يقدر يدفع بدري؛ التنبيه ⚠️ بس اللي بيظهر من يوم 25. قبل كده
+           *  كانت الكارت كلها مختفية لحد يوم 25 فمحدش كان يعرف يجرّب الدفع. */}
           {payments
             .filter((p) => p.status === 'due')
             .map((p) => ({ p, status: paymentCollectionStatus(p.createdAt) }))
-            .filter((x) => x.status !== 'not-yet')
             .map(({ p, status }) => (
               <div key={p.id} className={`remind${status === 'overdue' ? ' overdue' : ''}`}>
                 <div>
+                  {status === 'not-yet' && `المستحق ${p.amount} جنيه — تقدر تدفع دلوقتي أو تستنى لحد يوم 25.`}
                   {status === 'open' && `⚠️ لسه عليك ${p.amount} جنيه.`}
                   {status === 'grace' && `⚠️ لسه عليك ${p.amount} جنيه.`}
                   {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر.`}
