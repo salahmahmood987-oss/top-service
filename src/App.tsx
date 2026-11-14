@@ -770,7 +770,7 @@ function CustomerView({
   // نموذج الاشتراك
   const [subCarId, setSubCarId] = useState<string | null>(null)
   const [subPkg, setSubPkg] = useState<number>(4)
-  const [subMethod, setSubMethod] = useState<PaymentMethod>('cash')
+  const [subMethod, setSubMethod] = useState<PaymentMethod>('visa')
   // معالج الاشتراك الموجَّه (v15): كومباوند ← مرحلة ← عدد الغسلات
   const [wizStep, setWizStep] = useState<1 | 2 | 3>(1)
   const [wizCompoundId, setWizCompoundId] = useState<string | null>(null)
@@ -1011,7 +1011,7 @@ function CustomerView({
   function openWizard(carId: string) {
     setSubCarId(carId)
     setSubPkg(packages[0]?.id ?? 4)
-    setSubMethod('cash')
+    setSubMethod('visa')
     setWizStep(1)
     setWizCompoundId(customer?.compoundId ?? null)
     setWizPhaseId(null)
@@ -1700,7 +1700,6 @@ function CustomerView({
                           value={subMethod}
                           onChange={(e) => setSubMethod(e.target.value as PaymentMethod)}
                         >
-                          <option value="cash">نقدي (تحصيل عند الباب)</option>
                           <option value="visa">فيزا</option>
                           <option value="wallet">محفظة إلكترونية</option>
                         </select>
