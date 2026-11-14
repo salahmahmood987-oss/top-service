@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v21)
+//  Top Service — المرحلة 1 (v22)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -17,6 +17,8 @@ import { Browser } from '@capacitor/browser'
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera'
 import { Capacitor } from '@capacitor/core'
 import type { PluginListenerHandle } from '@capacitor/core'
+import { Directory, Filesystem } from '@capacitor/filesystem'
+import { FileOpener } from '@capacitor-community/file-opener'
 import { where } from 'firebase/firestore'
 import logoTransparent from './assets/logo-top-services-transparent.png'
 import { isFirebaseConfigured } from './firebaseConfig'
@@ -60,6 +62,7 @@ import {
   verifyKashierSession,
 } from './kashier'
 import type { KashierPayMethod } from './kashier'
+import { APP_VERSION, VERSION_URL } from './version'
 import { clearSession, loadSession, saveSession } from './store'
 import type { Session } from './store'
 import { preparePhotoForFirestore } from './imageUpload'
@@ -273,6 +276,12 @@ type GateStep = 'phone' | 'otp' | 'profile' | 'main'
 
 export default function App() {
   const [notice, setNotice] = useState<string | null>(null)
+  // فحص التحديثات (v22 — زي ind toktok): عند الفتح بنفحص version.json،
+  // ولو فيه إصدار أحدث بيظهر مودال "في إصدار جديد" بزر تحديث جوّه التطبيق.
+  const [availableUpdate, setAvailableUpdate] = useState<{ version: number; apkUrl: string } | null>(null)
+  const [updateBusy, setUpdateBusy] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState(0)
+  const [updateError, setUpdateError] = useState('')
   const [session, setSession] = useState<Session | null>(null)
   const [gate, setGate] = useState<GateStep>('phone')
   const [phoneInput, setPhoneInput] = useState('')
@@ -312,6 +321,30 @@ export default function App() {
       if (p) setPackages(p)
     })
     return () => setFirestoreErrorHandler(null)
+  }, [])
+
+  // فحص التحديثات عند الفتح: لو فيه إصدار أحدث على الريبو يظهر تنبيه جوّه التطبيق
+  useEffect(() => {
+    let cancelled = false
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 6000)
+    fetch(VERSION_URL, { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        clearTimeout(timer)
+        if (cancelled || !data || typeof data.version !== 'number') return
+        if (data.version <= APP_VERSION) return
+        if (localStorage.getItem('topservice-update-dismissed') === String(data.version)) return
+        setAvailableUpdate({ version: data.version, apkUrl: typeof data.apkUrl === 'string' ? data.apkUrl : '' })
+      })
+      .catch(() => {
+        // مفيش نت أو الملف مش موجود — نتجاهل بصمت
+      })
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+      controller.abort()
+    }
   }, [])
 
   function logout() {
@@ -518,6 +551,64 @@ export default function App() {
   // رقم الأدمن معفي من حد الـ 3 أكواد في الساعة — سطر "فاضل X من 3" مبيظهرلوش
   const isAdminPhone = toE164Phone(phoneInput) === ADMIN_PHONE
 
+  /** تحديث جوّه التطبيق من غير لينكات: يحمّل الـ APK ويفتح مثبّت أندرويد —
+   *  نفس طريقة ind toktok (v34). التثبيت بيتم عادي على أي نسبة بطارية،
+   *  والمودال فيه "حدّث دلوقتي" + "بعدين" بس، من غير أي زر تاني. */
+  async function installUpdate(apkUrl: string) {
+    if (updateBusy) return
+    setUpdateBusy(true)
+    setUpdateProgress(0)
+    setUpdateError('')
+    try {
+      // امسح أي نسخة قديمة متعلّقة قبل التحميل
+      try { await Filesystem.deleteFile({ path: 'top-service-update.apk', directory: Directory.Cache }) } catch { /* مفيش ملف قديم */ }
+      const listener = await Filesystem.addListener('progress', (p) => {
+        if (p.contentLength > 0) setUpdateProgress(Math.round((p.bytes / p.contentLength) * 100))
+      })
+      try {
+        const result = await Filesystem.downloadFile({
+          url: apkUrl,
+          path: 'top-service-update.apk',
+          directory: Directory.Cache,
+          progress: true,
+        })
+        let filePath = result.path ?? ''
+        if (!filePath.startsWith('/')) {
+          const { uri } = await Filesystem.getUri({ path: 'top-service-update.apk', directory: Directory.Cache })
+          filePath = uri.replace(/^file:\/\//, '')
+        }
+        await FileOpener.open({ filePath, contentType: 'application/vnd.android.package-archive' })
+        // مثبّت أندرويد اتفتح — التطبيق هيروح خلفية لحد ما التثبيت يخلص
+        setAvailableUpdate(null)
+      } finally {
+        await listener.remove()
+      }
+    } catch {
+      setUpdateError('تعذر تحميل التحديث — تأكد من النت وجرب «حدّث دلوقتي» تاني.')
+    } finally {
+      setUpdateBusy(false)
+      setUpdateProgress(0)
+    }
+  }
+  // مودال التحديث — بيظهر لما يكون فيه إصدار أحدث (قابل للتجاهل، مش إجباري)
+  const dismissUpdate = () => {
+    if (availableUpdate) localStorage.setItem('topservice-update-dismissed', String(availableUpdate.version))
+    setAvailableUpdate(null)
+  }
+  const updateModal = availableUpdate ? (
+    <div className="notice-overlay" onClick={dismissUpdate}>
+      <div className="notice-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="notice-icon">⬆</div>
+        <p>في إصدار جديد من Top Service (v{availableUpdate.version}) — حدّث التطبيق عشان تشوف آخر المميزات والتحسينات.</p>
+        {updateError && <p className="muted">{updateError}</p>}
+        <div className="row">
+          <button className="btn" disabled={updateBusy} onClick={() => void installUpdate(availableUpdate.apkUrl)}>{updateBusy ? (updateProgress > 0 ? `بيحمّل التحديث… ${updateProgress}%` : 'بيحمّل التحديث…') : 'حدّث دلوقتي ⬇'}</button>
+          <button className="btn small" onClick={dismissUpdate}>بعدين</button>
+        </div>
+      </div>
+    </div>
+  ) : null
+
   return (
     <div className="app">
       <header className="header">
@@ -542,7 +633,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 21 — المرحلة 1</span>
+        <span className="badge">الإصدار 22 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -727,10 +818,11 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 21</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 22</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
+      {updateModal}
     </div>
   )
 }
