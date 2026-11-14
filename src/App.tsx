@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v20)
+//  Top Service — المرحلة 1 (v21)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
 //  الغسيل بجدول مراحل ثابت: الأدمن بيحدد مراحل كل كومباوند (مجموعة أيام
 //  أسبوع) ويربط كل عربية بمرحلة — العميل مبيطلبش غسلة، وعامل الغسيل
 //  بيشوف عربيات النهاردة بس ويعلّم "تم الغسيل" (مع صورة اختيارية كإثبات).
-//  الدفع الأونلاين (v20 — Kashier، وضع اختبار): زرار "ادفع أونلاين" في
+//  الدفع الأونلاين (v20 — Kashier، وضع اختبار؛ v21: زرارين فيزا/محفظة) في
 //  تذكير الدفع بيفتح صفحة Kashier، والتحقق بيتم عن طريق Worker.
 //  لا توجد بيانات وهمية — كل رقم من Firestore (أو حالة "غير مربوط" صادقة).
 //  الأخطاء والرسائل في مودال وسط الشاشة، وليست شريطاً علوياً.
@@ -59,6 +59,7 @@ import {
   isKashierConfigured,
   verifyKashierSession,
 } from './kashier'
+import type { KashierPayMethod } from './kashier'
 import { clearSession, loadSession, saveSession } from './store'
 import type { Session } from './store'
 import { preparePhotoForFirestore } from './imageUpload'
@@ -541,7 +542,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 20 — المرحلة 1</span>
+        <span className="badge">الإصدار 21 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -726,7 +727,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 20</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 21</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -781,7 +782,7 @@ function CustomerView({
   const [wizBuilding, setWizBuilding] = useState('')
   const [wizApartment, setWizApartment] = useState('')
   const [washBusy, setWashBusy] = useState<string | null>(null)
-  // الدفع الأونلاين (v20 — Kashier، وضع اختبار): دفعة واحدة جارية في المرة
+  // الدفع الأونلاين (v20 — Kashier، وضع اختبار؛ v21: زرارين فيزا/محفظة): دفعة واحدة جارية في المرة
   const [payBusy, setPayBusy] = useState<string | null>(null)
   /** جلسة دفع مفتوحة في المتصفح — بنتحقق منها لما التبويب يتقفل */
   const pendingPayRef = useRef<{ paymentId: string; sessionId: string } | null>(null)
@@ -908,7 +909,7 @@ function CustomerView({
   /** التحقق من جلسة دفع بعد ما العميل يرجع من صفحة Kashier — المصدر
    *  الوحيد للحقيقة هو الـ Worker (بيسأل Kashier نفسه عن حالة الجلسة).
    *  لو الدفع ناجح، بنأكد التحصيل بنفس دالة تأكيد التحصيل (إيصال TS-…).
-   *  v20 — وضع اختبار بس: مفيش فلوس حقيقية بتتحرك. */
+   *  v20+ — وضع اختبار بس: مفيش فلوس حقيقية بتتحرك. */
   async function verifyPendingPayment(): Promise<void> {
     const pending = pendingPayRef.current
     if (!pending) return
@@ -922,7 +923,7 @@ function CustomerView({
     }
     if (!res.paid) {
       setPayBusy(null)
-      onNotice('الدفع لسه مكتملش — تقدر تحاول تاني من زرار "ادفع أونلاين".')
+      onNotice('الدفع لسه مكتملش — تقدر تحاول تاني من أزرار الدفع.')
       return
     }
     const done = await confirmCollection(pending.paymentId)
@@ -939,7 +940,7 @@ function CustomerView({
    *  ← التحقق لما التبويب يتقفل. لو فيه جلسة قديمة لنفس الدفعة لسه
    *  مفتوحة، بنتحقق منها الأول بدل ما نعمل جلسة جديدة (عشان العميل
    *  ميدفعش مرتين بالغلط). */
-  async function payOnline(p: Payment): Promise<void> {
+  async function payOnline(p: Payment, method: KashierPayMethod): Promise<void> {
     if (payBusy) return
     if (!isKashierConfigured()) {
       onNotice('الدفع الأونلاين لسه متركبش في التطبيق.')
@@ -950,7 +951,7 @@ function CustomerView({
       return
     }
     setPayBusy(p.id)
-    const created = await createKashierSession(p.id, p.amount, session.phone)
+    const created = await createKashierSession(p.id, p.amount, session.phone, method)
     if (!created.ok || !created.sessionUrl || !created.sessionId) {
       setPayBusy(null)
       onNotice(created.message ?? 'مقدرناش نجهّز الدفع دلوقتي — حاول تاني.')
@@ -1265,14 +1266,24 @@ function CustomerView({
                   {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر.`}
                 </div>
                 {isKashierConfigured() && (
-                  <button
-                    className="btn"
-                    style={{ marginTop: 10 }}
-                    disabled={payBusy === p.id}
-                    onClick={() => void payOnline(p)}
-                  >
-                    {payBusy === p.id ? 'جارٍ تجهيز الدفع…' : '💳 ادفع أونلاين'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    <button
+                      className="btn"
+                      style={{ flex: 1 }}
+                      disabled={payBusy === p.id}
+                      onClick={() => void payOnline(p, 'card')}
+                    >
+                      {payBusy === p.id ? 'جارٍ تجهيز الدفع…' : '💳 ادفع بالفيزا'}
+                    </button>
+                    <button
+                      className="btn"
+                      style={{ flex: 1 }}
+                      disabled={payBusy === p.id}
+                      onClick={() => void payOnline(p, 'wallet')}
+                    >
+                      {payBusy === p.id ? 'جارٍ تجهيز الدفع…' : '📱 ادفع بالمحفظة'}
+                    </button>
+                  </div>
                 )}
               </div>
             ))}

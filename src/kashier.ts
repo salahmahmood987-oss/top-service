@@ -4,8 +4,12 @@
 // بينشئ جلسة الدفع عند Kashier وبيتحقق من نتيجتها — مفاتيح Kashier
 // (MID + Payment API Key + Secret Key) عنده هو بس في الـ secrets،
 // والتطبيق مبيعرفهاش أبداً:
-//   POST {WORKER_URL}/create-session { paymentId, amount, phone }
+//   POST {WORKER_URL}/create-session { paymentId, amount, phone, method? }
 //        -> { ok, sessionUrl, sessionId }
+//   method (v21): 'card' | 'wallet' — الطريقة اللي اختارها العميل من زراريه
+//   في التطبيق؛ الـ Worker بيبعتها لـ Kashier كـ defaultMethod فصفحة الدفع
+//   تفتح عليها على طول (والطريقتين بيفضلوا متاحين في الصفحة).
+// وضع اختبار بس (v20+): مفيش فلوس حقيقية بتتحرك.
 //   POST {WORKER_URL}/verify-session { sessionId }
 //        -> { ok, status, paid }
 // رابط الـ Worker علني (مش سر) وبيتضبط وقت البناء بـ
@@ -76,12 +80,16 @@ function asBoolean(v: unknown): boolean | undefined {
   return typeof v === 'boolean' ? v : undefined
 }
 
+/** طريقة الدفع اللي اختارها العميل من زراريه (v21): فيزا أو محفظة إلكترونية. */
+export type KashierPayMethod = 'card' | 'wallet'
+
 export async function createKashierSession(
   paymentId: string,
   amount: number,
   phone: string,
+  method?: KashierPayMethod,
 ): Promise<KashierSessionResponse> {
-  const data = await postJson('/create-session', { paymentId, amount, phone })
+  const data = await postJson('/create-session', { paymentId, amount, phone, method })
   if (!data) return { ok: false, error: 'network', message: WORKER_UNREACHABLE }
   return {
     ok: data.ok === true,
