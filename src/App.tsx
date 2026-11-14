@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v22)
+//  Top Service — المرحلة 1 (v23)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -36,6 +36,7 @@ import {
   loadCollection,
   loadCompounds,
   loadCustomer,
+  loadDoc,
   loadPackages,
   loadPaymentsOfCustomer,
   loadSubscriptionsOfCustomer,
@@ -58,6 +59,8 @@ import {
 import { sendOtpCode, toE164Phone, verifyOtpCode } from './otp'
 import {
   createKashierSession,
+  deleteSavedToken,
+  getSavedToken,
   isKashierConfigured,
   verifyKashierSession,
 } from './kashier'
@@ -633,7 +636,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 22 — المرحلة 1</span>
+        <span className="badge">الإصدار 23 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -818,7 +821,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 22</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 23</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -876,22 +879,33 @@ function CustomerView({
   const [washBusy, setWashBusy] = useState<string | null>(null)
   // الدفع الأونلاين (v20 — Kashier، وضع اختبار؛ v21: زرارين فيزا/محفظة): دفعة واحدة جارية في المرة
   const [payBusy, setPayBusy] = useState<string | null>(null)
-  /** جلسة دفع مفتوحة في المتصفح — بنتحقق منها لما التبويب يتقفل */
-  const pendingPayRef = useRef<{ paymentId: string; sessionId: string } | null>(null)
+  /** السحب التلقائي (v23): الكارت المحفوظ للعميل — null يعني مش مفعّل */
+  const [autoPay, setAutoPay] = useState<{ maskedCard: string } | null>(null)
+  const [autoPayBusy, setAutoPayBusy] = useState(false)
+  /** جلسة دفع مفتوحة في المتصفح — بنتحقق منها لما التبويب يتقفل.
+   *  method = الزرار اللي داس عليه العميل (فيزا/محفظة)؛ لو فيزا، بعد
+   *  نجاح الدفع بنجيب الكارت المحفوظ ونفعّل السحب التلقائي. */
+  const pendingPayRef = useRef<{ paymentId: string; sessionId: string; method: KashierPayMethod } | null>(null)
 
   const loadAll = async () => {
-    const [c, cs, ss, ps, hs] = await Promise.all([
+    const [c, cs, ss, ps, hs, tok] = await Promise.all([
       loadCustomer(session.phone),
       loadCarsOfCustomer(session.phone),
       loadSubscriptionsOfCustomer(session.phone),
       loadPaymentsOfCustomer(session.phone),
       loadWashHistoryOfCustomer(session.phone),
+      loadDoc('paymentTokens', session.phone),
     ])
     setCustomer(c)
     setCars(cs)
     setSubs(ss)
     setPayments(ps)
     setHistory(hs)
+    setAutoPay(
+      tok && tok.autoPay === true && typeof tok.maskedCard === 'string'
+        ? { maskedCard: tok.maskedCard }
+        : null,
+    )
     setLoading(false)
   }
 
@@ -1001,6 +1015,8 @@ function CustomerView({
   /** التحقق من جلسة دفع بعد ما العميل يرجع من صفحة Kashier — المصدر
    *  الوحيد للحقيقة هو الـ Worker (بيسأل Kashier نفسه عن حالة الجلسة).
    *  لو الدفع ناجح، بنأكد التحصيل بنفس دالة تأكيد التحصيل (إيصال TS-…).
+   *  v23 — لو الدفع كان بالفيزا، بنجيب الكارت المحفوظ من Kashier
+   *  ونحفظه (توكن + اتفاقية) عشان السحب التلقائي أول كل شهر.
    *  v20+ — وضع اختبار بس: مفيش فلوس حقيقية بتتحرك. */
   async function verifyPendingPayment(): Promise<void> {
     const pending = pendingPayRef.current
@@ -1025,6 +1041,32 @@ function CustomerView({
       return
     }
     await loadAll()
+    // أول دفعة فيزا ناجحة → فعّل السحب التلقائي: الكارت بيتحفظ عند
+    // Kashier في شكل توكن (رقم الكارت نفسه مبيوصلناش أبداً)؛ بنجيبه
+    // من الـ Worker ونحفظه في paymentTokens/{phone}. محاولة تانية بعد
+    // 4 ثواني لو التوكن لسه متسجلش عند Kashier.
+    if (pending.method === 'card') {
+      try {
+        let tok = await getSavedToken(session.phone)
+        if (!tok.ok && tok.error === 'no_token') {
+          await new Promise((r) => setTimeout(r, 4000))
+          tok = await getSavedToken(session.phone)
+        }
+        if (tok.ok && tok.token) {
+          await saveDoc('paymentTokens', session.phone, {
+            phone: session.phone,
+            token: tok.token,
+            agreementId: tok.agreementId ?? '',
+            maskedCard: tok.maskedCard ?? '',
+            autoPay: true,
+            updatedAt: Date.now(),
+          })
+          if (tok.maskedCard) setAutoPay({ maskedCard: tok.maskedCard })
+        }
+      } catch {
+        // السحب التلقائي هيتفعّل من الـ webhook لوحده — الدفع نفسه تم.
+      }
+    }
     onNotice(`تم الدفع أونلاين ✅ — ${done.message}`)
   }
 
@@ -1043,13 +1085,15 @@ function CustomerView({
       return
     }
     setPayBusy(p.id)
-    const created = await createKashierSession(p.id, p.amount, session.phone, method)
+    // v23: الدفع بالفيزا بيحفظ الكارت عند Kashier (saveCard) عشان
+    // السحب التلقائي أول كل شهر؛ المحفظة مينفعش تتسحب تلقائي أصلاً.
+    const created = await createKashierSession(p.id, p.amount, session.phone, method, method === 'card')
     if (!created.ok || !created.sessionUrl || !created.sessionId) {
       setPayBusy(null)
       onNotice(created.message ?? 'مقدرناش نجهّز الدفع دلوقتي — حاول تاني.')
       return
     }
-    pendingPayRef.current = { paymentId: p.id, sessionId: created.sessionId }
+    pendingPayRef.current = { paymentId: p.id, sessionId: created.sessionId, method }
     setPayBusy(null)
     try {
       await Browser.open({ url: created.sessionUrl })
@@ -1057,6 +1101,21 @@ function CustomerView({
       pendingPayRef.current = null
       onNotice('مقدرناش نفتح صفحة الدفع — حاول تاني.')
     }
+  }
+
+  /** إلغاء السحب التلقائي (v23): حذف التوكن عند Kashier وعندنا — الدفعات
+   *  المستحقة بتفضل مستحقة وبتتدفع يدوي من الأزرار. */
+  async function cancelAutoPay(): Promise<void> {
+    if (autoPayBusy || !autoPay) return
+    setAutoPayBusy(true)
+    const res = await deleteSavedToken(session.phone)
+    setAutoPayBusy(false)
+    if (!res.ok) {
+      onNotice(res.message ?? 'مقدرناش نلغي السحب التلقائي دلوقتي — حاول تاني.')
+      return
+    }
+    setAutoPay(null)
+    onNotice('تم إلغاء السحب التلقائي ✅ — الدفعات الجاية هتدفعها يدوي.')
   }
 
   async function addCar(e: FormEvent) {
@@ -1357,6 +1416,12 @@ function CustomerView({
                   {status === 'grace' && `⚠️ لسه عليك ${p.amount} جنيه.`}
                   {status === 'overdue' && `⚠️ المبلغ ${p.amount} جنيه متأخر.`}
                 </div>
+                {autoPay && (
+                  <p className="muted" style={{ marginTop: 6 }}>
+                    🔄 السحب التلقائي مفعّل — هيتخصم من الفيزا •••• {autoPay.maskedCard.slice(-4)} أول
+                    الشهر الجاي لوحدها. تقدر تدفع دلوقتي من الأزرار أو تلغي السحب التلقائي من الملف الشخصي.
+                  </p>
+                )}
                 {isKashierConfigured() && (
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     <button
@@ -1806,6 +1871,17 @@ function CustomerView({
                           <option value="visa">فيزا</option>
                           <option value="wallet">محفظة إلكترونية</option>
                         </select>
+                        {subMethod === 'visa' ? (
+                          <p className="muted">
+                            💳 بدفعك بالفيزا، الكارت هيتحفظ عند كاشير (رقمه مبيتخزنش عندنا)
+                            عشان الاشتراك يتخصم تلقائي كل أول شهر. تقدر تلغي السحب التلقائي من
+                            الملف الشخصي في أي وقت.
+                          </p>
+                        ) : (
+                          <p className="muted">
+                            📱 المحفظة بتتدفع يدوي كل شهر — مينفعش سحب تلقائي من المحفظة.
+                          </p>
+                        )}
                         <div className="row">
                           <button className="btn small" onClick={() => setWizStep(2)}>
                             رجوع
@@ -1908,6 +1984,28 @@ function CustomerView({
                 <div className="muted">الكومباوند: <b>{customer.compoundName}</b></div>
                 <div className="muted">العمارة: <b>{customer.building}</b> — الشقة: <b>{customer.apartment}</b></div>
                 <div className="muted">عربيات مسجلة: <b>{cars.length}</b></div>
+              </div>
+              {/* السحب التلقائي (v23) */}
+              <div className="ride">
+                <div className="muted">
+                  الدفع التلقائي:{' '}
+                  {autoPay ? (
+                    <b>مفعّل ✅ — فيزا •••• {autoPay.maskedCard.slice(-4)} — هيتخصم تلقائي أول كل شهر</b>
+                  ) : (
+                    <b>مش مفعّل — فعّله بأنك تدفع أول دفعة بالفيزا من أزرار الدفع</b>
+                  )}
+                </div>
+                {autoPay && (
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <button
+                      className="btn small danger"
+                      onClick={() => void cancelAutoPay()}
+                      disabled={autoPayBusy}
+                    >
+                      {autoPayBusy ? 'بيلغي…' : 'إلغاء السحب التلقائي'}
+                    </button>
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -2382,6 +2480,8 @@ function AdminView({
   const [subs, setSubs] = useState<Subscription[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [washers, setWashers] = useState<Washer[]>([])
+  /** السحب التلقائي (v23): آخر 4 أرقام من الكارت المحفوظ، مفتاحه رقم العميل */
+  const [autoPayByPhone, setAutoPayByPhone] = useState<Record<string, string>>({})
   const [doneToday, setDoneToday] = useState<WashRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -2423,18 +2523,26 @@ function AdminView({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   const loadAll = async () => {
-    const [cs, cars, ss, ps, ws] = await Promise.all([
+    const [cs, cars, ss, ps, ws, toks] = await Promise.all([
       loadAllCustomers(),
       loadAllCars(),
       loadAllSubscriptions(),
       loadAllPayments(),
       loadAllWashers(),
+      loadCollection('paymentTokens'),
     ])
     setCustomers(cs)
     setAllCars(cars)
     setSubs(ss)
     setPayments(ps)
     setWashers(ws)
+    const byPhone: Record<string, string> = {}
+    for (const t of toks) {
+      if (t.autoPay === true && typeof t.maskedCard === 'string' && typeof t.phone === 'string') {
+        byPhone[t.phone] = t.maskedCard
+      }
+    }
+    setAutoPayByPhone(byPhone)
     // غسلات اليوم المنجزة (من كل الطلبات المكتملة النهاردة — نقرأها من السجل العام)
     const all = await loadCollectionForDoneToday()
     setDoneToday(all)
@@ -3254,6 +3362,9 @@ function AdminView({
                   {p.carPlate} — {p.method === 'cash' ? 'نقدي' : p.method === 'visa' ? 'فيزا' : 'محفظة'} —{' '}
                   {fmtDateTime(p.createdAt)}
                 </div>
+                {autoPayByPhone[p.customerPhone] && (
+                  <div className="muted">🔄 سحب تلقائي مفعّل — فيزا •••• {autoPayByPhone[p.customerPhone].slice(-4)} (هيتخصم أول الشهر)</div>
+                )}
                 <div className="row">
                   <button
                     className="btn small active"

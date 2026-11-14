@@ -12,10 +12,16 @@
 // وضع اختبار بس (v20+): مفيش فلوس حقيقية بتتحرك.
 //   POST {WORKER_URL}/verify-session { sessionId }
 //        -> { ok, status, paid }
+//   POST {WORKER_URL}/get-token { phone }
+//        -> { ok, token, agreementId, maskedCard, ... } | { ok: false, error: 'no_token' }
+//        يجيب الكارت المحفوظ عند Kashier بعد أول دفعة فيزا (v23).
+//   POST {WORKER_URL}/delete-token { phone }
+//        -> { ok, deleted } — إلغاء السحب التلقائي: حذف التوكن عند Kashier
+//        وعندنا (v23).
 // رابط الـ Worker علني (مش سر) وبيتضبط وقت البناء بـ
 // VITE_KASHIER_WORKER_URL. لو المتغير مش مضبوط، isKashierConfigured()
 // ترجع false وزرار الدفع الأونلاين مبيظهرش.
-// وضع اختبار بس (v20): مفيش فلوس حقيقية بتتحرك.
+// وضع اختبار بس (v20+): مفيش فلوس حقيقية بتتحرك.
 // ---------------------------------------------------------------------------
 
 const WORKER_URL = (
@@ -88,8 +94,9 @@ export async function createKashierSession(
   amount: number,
   phone: string,
   method?: KashierPayMethod,
+  saveCard?: boolean,
 ): Promise<KashierSessionResponse> {
-  const data = await postJson('/create-session', { paymentId, amount, phone, method })
+  const data = await postJson('/create-session', { paymentId, amount, phone, method, saveCard: saveCard === true })
   if (!data) return { ok: false, error: 'network', message: WORKER_UNREACHABLE }
   return {
     ok: data.ok === true,
@@ -118,6 +125,60 @@ export async function verifyKashierSession(
       typeof data.method === 'string' || data.method === null
         ? (data.method as string | null)
         : undefined,
+    error: asString(data.error),
+    message: asString(data.message),
+  }
+}
+
+export interface SavedTokenResponse {
+  ok: boolean
+  token?: string
+  agreementId?: string | null
+  maskedCard?: string | null
+  cardHolderName?: string | null
+  agreementType?: string | null
+  error?: string
+  message?: string
+}
+
+/** يجيب الكارت المحفوظ عند Kashier لرقم العميل (بعد أول دفعة فيزا).
+ *  بيرجع no_token لو لسه مفيش كارت محفوظ. (v23 — السحب التلقائي) */
+export async function getSavedToken(phone: string): Promise<SavedTokenResponse> {
+  const data = await postJson('/get-token', { phone })
+  if (!data) return { ok: false, error: 'network', message: WORKER_UNREACHABLE }
+  return {
+    ok: data.ok === true,
+    token: asString(data.token),
+    agreementId:
+      typeof data.agreementId === 'string' || data.agreementId === null
+        ? (data.agreementId as string | null)
+        : undefined,
+    maskedCard:
+      typeof data.maskedCard === 'string' || data.maskedCard === null
+        ? (data.maskedCard as string | null)
+        : undefined,
+    cardHolderName:
+      typeof data.cardHolderName === 'string' || data.cardHolderName === null
+        ? (data.cardHolderName as string | null)
+        : undefined,
+    agreementType:
+      typeof data.agreementType === 'string' || data.agreementType === null
+        ? (data.agreementType as string | null)
+        : undefined,
+    error: asString(data.error),
+    message: asString(data.message),
+  }
+}
+
+/** إلغاء السحب التلقائي: حذف التوكن عند Kashier وعندنا. (v23) */
+export async function deleteSavedToken(
+  phone: string,
+): Promise<{ ok: boolean; deleted?: boolean; error?: string; message?: string }> {
+  const data = await postJson('/delete-token', { phone })
+  if (!data) return { ok: false, error: 'network', message: WORKER_UNREACHABLE }
+  return {
+    ok: data.ok === true,
+    deleted: asBoolean(data.deleted),
     error: asString(data.error),
     message: asString(data.message),
   }
