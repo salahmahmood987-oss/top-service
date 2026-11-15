@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v25)
+//  Top Service — المرحلة 1 (v26)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Browser } from '@capacitor/browser'
+import { App as CapApp } from '@capacitor/app'
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera'
 import { Capacitor } from '@capacitor/core'
 import type { PluginListenerHandle } from '@capacitor/core'
@@ -636,7 +637,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 25 — المرحلة 1</span>
+        <span className="badge">الإصدار 26 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -821,7 +822,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 25</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 26</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -969,6 +970,24 @@ function CustomerView({
     let handle: PluginListenerHandle | null = null
     void Browser.addListener('browserFinished', () => {
       void verifyPendingRef.current()
+    }).then((h) => {
+      handle = h
+    })
+    return () => {
+      void handle?.remove()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // v26 — التحقق عند الرجوع للتطبيق: الدفع بيفتح صفحة Kashier في
+  // المتصفح، ولو المتصفح الخارجي (مثلاً Samsung Internet) هو اللي فتح
+  // فـ browserFinished مش هيتنده أصلاً. أول ما التطبيق يرجع للواجهة
+  // بنتحقق من أي دفعة معلّقة — زرار "ارجع للتطبيق" في صفحة /paid
+  // بيودّي العميل هنا، والتحقق ده هو اللي بيأكد الدفع ويطلع الإيصال.
+  useEffect(() => {
+    let handle: PluginListenerHandle | null = null
+    void CapApp.addListener('appStateChange', ({ isActive }) => {
+      if (isActive) void verifyPendingRef.current()
     }).then((h) => {
       handle = h
     })
