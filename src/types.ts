@@ -94,6 +94,9 @@ export interface Subscription {
   endDate: number
   createdAt: number
   approvedAt: number | null
+  /** شافها الأدمن في قايمة "اشتراكات جديدة" (v25) — الاشتراكات القديمة
+   *  اللي من غير الحقل ده بتتعامل كمقروءة، فمبتظهرش في القايمة. */
+  adminSeen?: boolean
 }
 
 export type PaymentStatus = 'pending' | 'due' | 'approved' | 'rejected'

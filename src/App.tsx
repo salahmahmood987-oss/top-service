@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-//  Top Service — المرحلة 1 (v24)
+//  Top Service — المرحلة 1 (v25)
 //  دخول OTP خطوة بخطوة (تليفون ← كود) — الدور بيتحدد من الرقم نفسه:
 //  رقم الأدمن → أدمن، رقم مسجّل كعامل غسيل → عامل غسيل، غير كده → عميل.
 //  بيانات العميل والعربية + باقات شهرية + لوحة أدمن + تأكيد دفع يدوي.
@@ -636,7 +636,7 @@ export default function App() {
           </a>
         </div>
         <p className="tagline">غسيل عربيات متنقلة في الكومباوندات</p>
-        <span className="badge">الإصدار 24 — المرحلة 1</span>
+        <span className="badge">الإصدار 25 — المرحلة 1</span>
       </header>
 
       {!isFirebaseConfigured && gate !== 'main' && (
@@ -821,7 +821,7 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 24</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار 25</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
@@ -1300,6 +1300,8 @@ function CustomerView({
       endDate: monthEndTimestamp(now),
       createdAt: now,
       approvedAt: now,
+      // الاشتراك الجديد بيظهر في قايمة "اشتراكات جديدة" عند الأدمن (v25)
+      adminSeen: false,
     })
     const okPay = okSub
       ? await saveDoc('payments', payId, {
@@ -2476,7 +2478,9 @@ function AdminView({
   onLogout: () => void
   onSwitchToCustomer: () => void
 }) {
-  const [tab, setTab] = useState<'dash' | 'customers' | 'payments' | 'today' | 'manage'>('dash')
+  const [tab, setTab] = useState<
+    'dash' | 'newsubs' | 'customers' | 'payments' | 'today' | 'manage'
+  >('dash')
   const [customers, setCustomers] = useState<Customer[]>([])
   const [allCars, setAllCars] = useState<Car[]>([])
   const [subs, setSubs] = useState<Subscription[]>([])
@@ -2523,6 +2527,9 @@ function AdminView({
   const [editCustomerApartment, setEditCustomerApartment] = useState('')
   // تأكيد حذف — ضغطتين: الأولى تجهّز، التانية تنفّذ
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  // اشتراكات جديدة (v25): أنهى اشتراك مفتوح عليه "ابعت للغسال" + الغسال المختار
+  const [sendSubId, setSendSubId] = useState<string | null>(null)
+  const [sendWasherPhone, setSendWasherPhone] = useState('')
 
   const loadAll = async () => {
     const [cs, cars, ss, ps, ws, toks] = await Promise.all([
@@ -3113,11 +3120,61 @@ function AdminView({
   const activeDueTotal = activeDue.reduce((sum, x) => sum + x.p.amount, 0)
   const graceDueCount = activeDue.filter((x) => x.status === 'grace').length
 
+  // اشتراكات جديدة (v25): اللي الأدمن لسه مشافهاش — أحدث اشتراك الأول
+  const newSubs = subs.filter((s) => s.adminSeen === false)
+  const newSubsCount = newSubs.length
+
+  /** علّم اشتراك جديد كمقروء (بيختفي من قايمة الجديدة). */
+  async function markSubSeen(subId: string) {
+    setBusyId(`seen-${subId}`)
+    const ok = await saveDoc('subscriptions', subId, { adminSeen: true })
+    setBusyId(null)
+    if (!ok) onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ — حاول تاني.')
+  }
+
+  /** علّم كل الاشتراكات الجديدة كمقروءة. */
+  async function markAllNewSeen() {
+    setBusyId('seen-all')
+    for (const s of newSubs) {
+      await saveDoc('subscriptions', s.id, { adminSeen: true })
+    }
+    setBusyId(null)
+  }
+
+  /** ابعت اشتراك جديد للغسال يدوياً: بيربط الغسال بكومباوند العميل
+   *  (فالغسال يشوف العربية في قايمة غسلات اليوم على طول)، وبيعلّم
+   *  الاشتراك كمقروء. */
+  async function sendSubToWasher(subId: string, compoundId: string, washerPhone: string) {
+    const w = washers.find((x) => x.phone === washerPhone)
+    if (!w || !compoundId) return
+    setBusyId(`send-${subId}`)
+    const ids = w.compoundIds.includes(compoundId)
+      ? w.compoundIds
+      : [...w.compoundIds, compoundId]
+    const ok = await saveDoc('washers', w.phone, { compoundIds: ids })
+    if (ok) {
+      setWashers((ws) => ws.map((x) => (x.phone === w.phone ? { ...x, compoundIds: ids } : x)))
+      await saveDoc('subscriptions', subId, { adminSeen: true })
+      setSendSubId(null)
+      onNotice(`تم ✅ — الغسال ${w.name} بقى مسئول عن الكومباوند ده، والاشتراك راح له.`)
+    } else {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ — حاول تاني.')
+    }
+    setBusyId(null)
+  }
+
   return (
     <>
       <div className="tabs">
         <button className={`tab${tab === 'dash' ? ' active' : ''}`} onClick={() => setTab('dash')}>
           <HomeIcon /> لوحة التحكم
+        </button>
+        <button
+          className={`tab${tab === 'newsubs' ? ' active' : ''}`}
+          onClick={() => setTab('newsubs')}
+        >
+          <PlusIcon /> اشتراكات جديدة
+          {newSubsCount > 0 && <span className="tab-badge">{newSubsCount}</span>}
         </button>
         <button
           className={`tab${tab === 'customers' ? ' active' : ''}`}
@@ -3174,12 +3231,122 @@ function AdminView({
               راجعهم
             </button>
           )}
+          {newSubsCount > 0 && (
+            <button className="btn big" onClick={() => setTab('newsubs')}>
+              <PlusIcon /> في {newSubsCount} اشتراكات جديدة — راجعهم
+            </button>
+          )}
           <button className="btn big" onClick={onSwitchToCustomer}>
             <CarIcon /> عرض التطبيق كعميل
           </button>
           <button className="btn danger big" onClick={onLogout}>
             <LogoutIcon /> تسجيل خروج
           </button>
+        </div>
+      )}
+
+      {tab === 'newsubs' && (
+        <div className="card">
+          <h2>🆕 اشتراكات جديدة ({newSubs.length})</h2>
+          <p className="muted">
+            أي اشتراك جديد بيظهر هنا الأول. الاشتراك بيروح للغسال بتاع كومباونده على طول (لو
+            الكومباوند ليه غسال مربوط) — ولو الكومباوند لسه ملهوش غسال، ابعته انت من هنا.
+          </p>
+          {newSubs.length > 0 && (
+            <button
+              className="btn"
+              onClick={() => void markAllNewSeen()}
+              disabled={busyId === 'seen-all'}
+            >
+              <CheckIcon /> تعليم الكل كمقروء
+            </button>
+          )}
+          {newSubs.length === 0 && (
+            <p className="muted">مفيش اشتراكات جديدة — كل الاشتراكات اتراجعت ✅</p>
+          )}
+          {newSubs.map((s) => {
+            const customer = customers.find((c) => c.phone === s.customerPhone)
+            const compoundId = customer?.compoundId ?? ''
+            const compoundName =
+              customer?.compoundName ??
+              compounds.find((c) => c.id === compoundId)?.name ??
+              '—'
+            const duePay = payments.find((p) => p.subscriptionId === s.id && p.status === 'due')
+            const compoundWashers = washers.filter(
+              (w) => w.active && compoundId !== '' && w.compoundIds.includes(compoundId),
+            )
+            const activeWashers = washers.filter((w) => w.active)
+            return (
+              <div className="ride" key={s.id}>
+                <div className="row">
+                  <div style={{ flex: 1 }}>
+                    <b>{s.customerName}</b>
+                    <div className="muted">
+                      📞 {s.customerPhone} — {s.carPlate} ({s.carType})
+                    </div>
+                    <div className="muted">
+                      {compoundName}
+                      {customer
+                        ? ` — عمارة ${customer.building} — شقة ${customer.apartment}`
+                        : ''}
+                    </div>
+                    <div className="muted">
+                      باقة {s.washesTotal} غسلات — {s.price} جنيه
+                      {duePay ? ` — المستحق ${duePay.amount} جنيه` : ''} — {fmtDate(s.createdAt)}
+                    </div>
+                    <div className="muted">
+                      {compoundWashers.length > 0
+                        ? `🧽 الغسال: ${compoundWashers.map((w) => w.name).join('، ')} — الاشتراك راح له على طول ✅`
+                        : '⚠️ الكومباوند ده لسه ملهوش غسال مربوط'}
+                    </div>
+                  </div>
+                </div>
+                <div className="row" style={{ marginTop: 8 }}>
+                  <button
+                    className="btn"
+                    onClick={() => void markSubSeen(s.id)}
+                    disabled={busyId === `seen-${s.id}`}
+                  >
+                    <CheckIcon /> {busyId === `seen-${s.id}` ? 'بيحفظ…' : 'شوفتها'}
+                  </button>
+                  {compoundWashers.length === 0 && compoundId !== '' && (
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setSendSubId(sendSubId === s.id ? null : s.id)
+                        setSendWasherPhone('')
+                      }}
+                    >
+                      📤 ابعت للغسال
+                    </button>
+                  )}
+                </div>
+                {sendSubId === s.id && compoundWashers.length === 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    <label>اختار الغسال اللي هيبقى مسئول عن {compoundName}</label>
+                    <select
+                      value={sendWasherPhone}
+                      onChange={(e) => setSendWasherPhone(e.target.value)}
+                    >
+                      <option value="">— اختار غسال —</option>
+                      {activeWashers.map((w) => (
+                        <option key={w.phone} value={w.phone}>
+                          {w.name} — {w.phone}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="btn big"
+                      disabled={!sendWasherPhone || busyId === `send-${s.id}`}
+                      onClick={() => void sendSubToWasher(s.id, compoundId, sendWasherPhone)}
+                    >
+                      {busyId === `send-${s.id}` ? 'بيحفظ…' : 'ابعت للغسال ✅'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 

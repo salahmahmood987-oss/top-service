@@ -230,6 +230,8 @@ export function normalizeSubscription(id: string, d: Record<string, unknown>): S
     endDate: p.endDate ?? monthEndTimestamp(),
     createdAt: p.createdAt ?? Date.now(),
     approvedAt: p.approvedAt ?? null,
+    // الاشتراكات القديمة من غير الحقل = مقروءة (مبتظهرش في قايمة الجديدة)
+    adminSeen: p.adminSeen ?? true,
   }
 }
 
