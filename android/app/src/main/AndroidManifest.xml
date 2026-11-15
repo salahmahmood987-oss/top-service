@@ -22,6 +22,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- v27: رابط الرجوع للتطبيق من صفحة الدفع (topservice://paid) —
+                 صيغة intent:// من v26 ماوصلتش للتطبيق في متصفح سامسونج
+                 والمتصفح حوّلها لمتجر بلاي (التطبيق مش عليه أصلاً). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="topservice" />
+            </intent-filter>
+
         </activity>
 
         <provider
