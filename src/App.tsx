@@ -883,8 +883,6 @@ function CustomerView({
   /** السحب التلقائي (v23): الكارت المحفوظ للعميل — null يعني مش مفعّل */
   const [autoPay, setAutoPay] = useState<{ maskedCard: string } | null>(null)
   const [autoPayBusy, setAutoPayBusy] = useState(false)
-  /** زرار إيقاف/تفعيل التجديد التلقائي لعربية (v28) — id الاشتراك الجاري حفظه */
-  const [autoRenewBusy, setAutoRenewBusy] = useState<string | null>(null)
   /** جلسة دفع مفتوحة في المتصفح — بنتحقق منها لما التبويب يتقفل.
    *  method = الزرار اللي داس عليه العميل (فيزا/محفظة)؛ لو فيزا، بعد
    *  نجاح الدفع بنجيب الكارت المحفوظ ونفعّل السحب التلقائي. */
@@ -1357,27 +1355,8 @@ function CustomerView({
     await loadAll()
     onNotice(
       isStubMonth
-        ? `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. الشهر ده من غير مستحق (اشتركت آخر يوم)، والاشتراك هيتجدد تلقائي الشهر الجديد بـ ${pkg.price} جنيه.`
-        : `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${dueAmount} جنيه${startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}، والتحصيل من يوم 25 لآخر الشهر + 5 أيام سماح. الاشتراك بيتجدد تلقائي كل شهر بنفس الباقة، وتقدر توقفه من صفحة العربية.`,
-    )
-  }
-
-  /** إيقاف / تفعيل التجديد التلقائي لاشتراك عربية (v28). */
-  async function toggleAutoRenew(sub: Subscription) {
-    if (autoRenewBusy) return
-    const next = sub.autoRenew === false ? true : false
-    setAutoRenewBusy(sub.id)
-    const ok = await saveDoc('subscriptions', sub.id, { autoRenew: next })
-    setAutoRenewBusy(null)
-    if (!ok) {
-      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ — حاول تاني.')
-      return
-    }
-    await loadAll()
-    onNotice(
-      next
-        ? 'التجديد التلقائي اتفعّل ✅ — الاشتراك هيتجدد لوحده أول كل شهر.'
-        : 'التجديد التلقائي اتوقف — الاشتراك مش هيتجدد لوحده، جدّد بنفسك من تبويب "باقاتي" بعد ما ينتهي.',
+        ? `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. الشهر ده من غير مستحق (اشتركت آخر يوم)، والاشتراك هيتجدد تلقائي الشهر الجديد بـ ${pkg.price} جنيه. ولو حبيت تلغي التجديد كلّمنا على 01050015559.`
+        : `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${dueAmount} جنيه${startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}، والتحصيل من يوم 25 لآخر الشهر + 5 أيام سماح. الاشتراك بيتجدد تلقائي كل شهر بنفس الباقة. ولو حبيت تلغي التجديد كلّمنا على 01050015559.`,
     )
   }
 
@@ -1545,18 +1524,6 @@ function CustomerView({
                         تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}
                       </div>
                     )}
-                    <button
-                      className="btn"
-                      style={{ marginTop: 8 }}
-                      disabled={autoRenewBusy === active.id}
-                      onClick={() => void toggleAutoRenew(active)}
-                    >
-                      {autoRenewBusy === active.id
-                        ? 'بيحفظ…'
-                        : active.autoRenew === false
-                          ? '🔄 تفعيل التجديد التلقائي'
-                          : '⏸️ إيقاف التجديد التلقائي'}
-                    </button>
                     {active && phase && (
                       <WashCalendar
                         car={car}
@@ -3195,6 +3162,26 @@ function AdminView({
     if (!ok) onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ — حاول تاني.')
   }
 
+  /** إيقاف / تفعيل التجديد التلقائي لاشتراك عربية (v29 — قرار صلاح:
+   *  الإلغاء عن طريق الأدمن بس، العميل بيكلّم صلاح وهو يلغيه). */
+  async function toggleAutoRenew(sub: Subscription) {
+    if (busyId) return
+    const next = sub.autoRenew === false ? true : false
+    setBusyId(`autorenew-${sub.id}`)
+    const ok = await saveDoc('subscriptions', sub.id, { autoRenew: next })
+    setBusyId(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ — حاول تاني.')
+      return
+    }
+    await loadAll()
+    onNotice(
+      next
+        ? 'التجديد التلقائي اتفعّل ✅ — الاشتراك هيتجدد لوحده أول كل شهر.'
+        : 'التجديد التلقائي اتوقف — الاشتراك ده مش هيتجدد لوحده.',
+    )
+  }
+
   /** علّم كل الاشتراكات الجديدة كمقروءة. */
   async function markAllNewSeen() {
     setBusyId('seen-all')
@@ -3495,6 +3482,20 @@ function AdminView({
                           </label>
                         )}
                       </div>
+                      {active && (
+                        <button
+                          className="btn small"
+                          style={{ marginTop: 6 }}
+                          disabled={busyId === `autorenew-${active.id}`}
+                          onClick={() => void toggleAutoRenew(active)}
+                        >
+                          {busyId === `autorenew-${active.id}`
+                            ? 'بيحفظ…'
+                            : active.autoRenew === false
+                              ? '🔄 تفعيل التجديد التلقائي'
+                              : '⏸️ إيقاف التجديد التلقائي'}
+                        </button>
+                      )}
                     </div>
                   )
                 })}
