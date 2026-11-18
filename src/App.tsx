@@ -32,6 +32,7 @@ import {
   loadAllCustomers,
   loadAllPayments,
   loadAllSubscriptions,
+  loadAllSupportChats,
   loadAllWashers,
   loadCarsOfCustomer,
   loadCollection,
@@ -41,6 +42,7 @@ import {
   loadPackages,
   loadPaymentsOfCustomer,
   loadSubscriptionsOfCustomer,
+  loadSupportChat,
   loadWashHistoryOfCustomer,
   loadWasher,
   loadWasherDoneWashes,
@@ -49,11 +51,13 @@ import {
   normalizeCustomer,
   normalizePayment,
   normalizeSubscription,
+  normalizeSupportChat,
   normalizeWash,
   recordWashDone,
   rejectPayment,
   saveDoc,
   savePackages,
+  sendSupportMessage,
   setFirestoreErrorHandler,
   subscribeCollection,
 } from './firebaseDb'
@@ -69,6 +73,7 @@ import type { KashierPayMethod } from './kashier'
 import { APP_VERSION, VERSION_URL } from './version'
 import { clearSession, loadSession, saveSession } from './store'
 import type { Session } from './store'
+import type { SupportChat } from './types'
 import { preparePhotoForFirestore } from './imageUpload'
 import {
   ADMIN_PHONE,
@@ -822,11 +827,107 @@ export default function App() {
       )}
 
       <footer className="footer">
-        <p>Top Service — غسيل عربيات متنقلة • الإصدار 27</p>
+        <p>Top Service — غسيل عربيات متنقلة • الإصدار {APP_VERSION}</p>
       </footer>
 
       {notice && <NoticeModal message={notice} onClose={() => setNotice(null)} />}
       {updateModal}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+//  شات الدعم (v30) — مكوّن مشترك بين العميل والأدمن: فقاعات مميزة حسب
+//  المرسل + تمرير تلقائي لآخر رسالة + صندوق إرسال.
+// ---------------------------------------------------------------------------
+
+function SupportThread({
+  chat,
+  viewer,
+  sending,
+  onSend,
+}: {
+  chat: SupportChat | null
+  viewer: 'customer' | 'admin'
+  sending: boolean
+  onSend: (text: string) => Promise<void>
+}) {
+  const [text, setText] = useState('')
+  const bottomRef = useRef<HTMLDivElement | null>(null)
+  const messages = chat?.messages ?? []
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages.length])
+
+  function senderLabel(sender: string): string {
+    if (sender === 'customer') return viewer === 'customer' ? 'أنت' : chat?.name || 'عميل'
+    if (sender === 'agent') return 'فريق الدعم'
+    return 'الإدارة'
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault()
+    const t = text.trim()
+    if (!t || sending) return
+    setText('')
+    await onSend(t)
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          maxHeight: 380,
+          overflowY: 'auto',
+          padding: '4px 2px',
+        }}
+      >
+        {messages.length === 0 && (
+          <p className="muted">لسه مفيش رسايل — اكتب سؤالك تحت وهنرد عليك هنا.</p>
+        )}
+        {messages.map((m, i) => {
+          const mine =
+            (viewer === 'customer' && m.sender === 'customer') ||
+            (viewer === 'admin' && m.sender !== 'customer')
+          const ts = Date.parse(m.createdAt)
+          return (
+            <div
+              key={`${m.createdAt}-${i}`}
+              style={{
+                alignSelf: mine ? 'flex-start' : 'flex-end',
+                maxWidth: '85%',
+                background: mine ? '#fde8e0' : '#f3e8f0',
+                border: mine ? '1px solid #f5c6b8' : '1px solid #e3cddd',
+                borderRadius: 14,
+                padding: '8px 12px',
+              }}
+            >
+              <div className="muted" style={{ fontSize: 12 }}>
+                {senderLabel(m.sender)}
+                {!Number.isNaN(ts) && ` — ${fmtDateTime(ts)}`}
+              </div>
+              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{m.text}</div>
+            </div>
+          )
+        })}
+        <div ref={bottomRef} />
+      </div>
+      <form onSubmit={(e) => void submit(e)} style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="اكتب رسالتك هنا…"
+          style={{ flex: 1 }}
+        />
+        <button type="submit" className="btn small" disabled={sending || text.trim() === ''}>
+          {sending ? 'بيتبعت…' : 'إرسال'}
+        </button>
+      </form>
     </div>
   )
 }
@@ -850,12 +951,17 @@ function CustomerView({
   onLogout: () => void
   onSwitchToAdmin: () => void
 }) {
-  const [tab, setTab] = useState<'home' | 'cars' | 'packages' | 'history' | 'profile'>('home')
+  const [tab, setTab] = useState<'home' | 'cars' | 'packages' | 'history' | 'profile' | 'support'>(
+    'home',
+  )
   const [customer, setCustomer] = useState<Customer | null>(null)
   const [cars, setCars] = useState<Car[]>([])
   const [subs, setSubs] = useState<Subscription[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [history, setHistory] = useState<WashRequest[]>([])
+  /** شات الدعم (v30): محادثة العميل — بتتحدث لحظياً مع كل رد */
+  const [supportChat, setSupportChat] = useState<SupportChat | null>(null)
+  const [supportBusy, setSupportBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   // نموذج إضافة عربية
@@ -889,19 +995,21 @@ function CustomerView({
   const pendingPayRef = useRef<{ paymentId: string; sessionId: string; method: KashierPayMethod } | null>(null)
 
   const loadAll = async () => {
-    const [c, cs, ss, ps, hs, tok] = await Promise.all([
+    const [c, cs, ss, ps, hs, tok, sc] = await Promise.all([
       loadCustomer(session.phone),
       loadCarsOfCustomer(session.phone),
       loadSubscriptionsOfCustomer(session.phone),
       loadPaymentsOfCustomer(session.phone),
       loadWashHistoryOfCustomer(session.phone),
       loadDoc('paymentTokens', session.phone),
+      loadSupportChat(session.phone),
     ])
     setCustomer(c)
     setCars(cs)
     setSubs(ss)
     setPayments(ps)
     setHistory(hs)
+    setSupportChat(sc)
     setAutoPay(
       tok && tok.autoPay === true && typeof tok.maskedCard === 'string'
         ? { maskedCard: tok.maskedCard }
@@ -946,13 +1054,35 @@ function CustomerView({
       },
       [where('customerPhone', '==', session.phone)],
     )
+    const un4 = subscribeCollection(
+      'supportChats',
+      (rows) => {
+        setSupportChat(rows.length > 0 ? normalizeSupportChat(rows[0].id, rows[0]) : null)
+      },
+      [where('phone', '==', session.phone)],
+    )
     return () => {
       un1()
       un2()
       un3()
+      un4()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.phone])
+
+  /** إرسال رسالة دعم (v30) — الرد بييجي لحظياً من المزامنة. */
+  async function sendSupport(text: string) {
+    if (supportBusy) return
+    setSupportBusy(true)
+    const ok = await sendSupportMessage(session.phone, 'customer', text, customer?.name)
+    setSupportBusy(false)
+    if (!ok) onNotice(getLastFirestoreError() ?? 'مقدرناش نبعت الرسالة — حاول تاني.')
+  }
+
+  /** فيه رد جديد من الدعم لسه العميل مشافهوش؟ */
+  const supportUnread =
+    !!supportChat?.lastReplyAt &&
+    (!supportChat.lastCustomerAt || supportChat.lastReplyAt > supportChat.lastCustomerAt)
 
   // تنبيهات الدفع على الموبايل (إشعارات محلية — للعميل بس): كل ما المدفوعات
   // تتغير، المستحق بيتجدول واللي اتدفع بتتلغي تذكيراته. صامت — من غير أي واجهة.
@@ -1410,6 +1540,13 @@ function CustomerView({
           onClick={() => setTab('profile')}
         >
           <UserIcon /> الملف الشخصي
+        </button>
+        <button
+          className={`tab${tab === 'support' ? ' active' : ''}`}
+          onClick={() => setTab('support')}
+        >
+          💬 الدعم
+          {supportUnread && <span className="tab-badge">1</span>}
         </button>
       </div>
 
@@ -2055,6 +2192,21 @@ function CustomerView({
           )}
         </div>
       )}
+
+      {tab === 'support' && (
+        <div className="card">
+          <h2>💬 الدعم</h2>
+          <p className="muted">
+            عندك سؤال عن الغسيل أو الاشتراك أو الدفع؟ اكتبه هنا وهنرد عليك في أقرب وقت.
+          </p>
+          <SupportThread
+            chat={supportChat}
+            viewer="customer"
+            sending={supportBusy}
+            onSend={sendSupport}
+          />
+        </div>
+      )}
     </>
   )
 }
@@ -2509,7 +2661,7 @@ function AdminView({
   onSwitchToCustomer: () => void
 }) {
   const [tab, setTab] = useState<
-    'dash' | 'newsubs' | 'customers' | 'payments' | 'today' | 'manage'
+    'dash' | 'newsubs' | 'customers' | 'payments' | 'today' | 'manage' | 'support'
   >('dash')
   const [customers, setCustomers] = useState<Customer[]>([])
   const [allCars, setAllCars] = useState<Car[]>([])
@@ -2560,21 +2712,27 @@ function AdminView({
   // اشتراكات جديدة (v25): أنهى اشتراك مفتوح عليه "ابعت للغسال" + الغسال المختار
   const [sendSubId, setSendSubId] = useState<string | null>(null)
   const [sendWasherPhone, setSendWasherPhone] = useState('')
+  /** شات الدعم (v30): كل المحادثات + المحادثة المفتوحة حالياً */
+  const [supportChats, setSupportChats] = useState<SupportChat[]>([])
+  const [openSupportPhone, setOpenSupportPhone] = useState<string | null>(null)
+  const [supportBusy, setSupportBusy] = useState(false)
 
   const loadAll = async () => {
-    const [cs, cars, ss, ps, ws, toks] = await Promise.all([
+    const [cs, cars, ss, ps, ws, toks, scs] = await Promise.all([
       loadAllCustomers(),
       loadAllCars(),
       loadAllSubscriptions(),
       loadAllPayments(),
       loadAllWashers(),
       loadCollection('paymentTokens'),
+      loadAllSupportChats(),
     ])
     setCustomers(cs)
     setAllCars(cars)
     setSubs(ss)
     setPayments(ps)
     setWashers(ws)
+    setSupportChats(scs)
     const byPhone: Record<string, string> = {}
     for (const t of toks) {
       if (t.autoPay === true && typeof t.maskedCard === 'string' && typeof t.phone === 'string') {
@@ -2627,11 +2785,18 @@ function AdminView({
           .sort((a, b) => b.createdAt - a.createdAt),
       )
     })
+    const un5 = subscribeCollection('supportChats', (rows) => {
+      const ts = (c: SupportChat) => (c.lastCustomerAt ? Date.parse(c.lastCustomerAt) : 0)
+      setSupportChats(
+        rows.map((r) => normalizeSupportChat(r.id, r)).sort((a, b) => ts(b) - ts(a)),
+      )
+    })
     return () => {
       un1()
       un2()
       un3()
       un4()
+      un5()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -3154,6 +3319,23 @@ function AdminView({
   const newSubs = subs.filter((s) => s.adminSeen === false)
   const newSubsCount = newSubs.length
 
+  /** شات الدعم (v30): محادثات فيها رسالة عميل لسه متردش عليها. */
+  const supportUnreadCount = supportChats.filter(
+    (c) => c.lastCustomerAt && (!c.lastReplyAt || c.lastCustomerAt > c.lastReplyAt),
+  ).length
+  const openSupportChat = openSupportPhone
+    ? (supportChats.find((c) => c.phone === openSupportPhone) ?? null)
+    : null
+
+  /** الرد على محادثة دعم من لوحة الأدمن (v30). */
+  async function replySupport(chat: SupportChat, text: string) {
+    if (supportBusy) return
+    setSupportBusy(true)
+    const ok = await sendSupportMessage(chat.phone, 'admin', text)
+    setSupportBusy(false)
+    if (!ok) onNotice(getLastFirestoreError() ?? 'مقدرناش نبعت الرد — حاول تاني.')
+  }
+
   /** علّم اشتراك جديد كمقروء (بيختفي من قايمة الجديدة). */
   async function markSubSeen(subId: string) {
     setBusyId(`seen-${subId}`)
@@ -3247,6 +3429,13 @@ function AdminView({
           onClick={() => setTab('manage')}
         >
           <ShieldIcon /> الإدارة
+        </button>
+        <button
+          className={`tab${tab === 'support' ? ' active' : ''}`}
+          onClick={() => setTab('support')}
+        >
+          💬 الدعم
+          {supportUnreadCount > 0 && <span className="tab-badge">{supportUnreadCount}</span>}
         </button>
       </div>
 
@@ -4046,6 +4235,71 @@ function AdminView({
               </button>
             </form>
           </div>
+        </>
+      )}
+
+      {tab === 'support' && (
+        <>
+          {openSupportChat ? (
+            <div className="card">
+              <button className="btn small" onClick={() => setOpenSupportPhone(null)}>
+                ← كل المحادثات
+              </button>
+              <h2 style={{ marginTop: 10 }}>
+                {openSupportChat.name || 'عميل'} — {openSupportChat.phone}
+              </h2>
+              <SupportThread
+                chat={openSupportChat}
+                viewer="admin"
+                sending={supportBusy}
+                onSend={(t) => replySupport(openSupportChat, t)}
+              />
+            </div>
+          ) : (
+            <div className="card">
+              <h2>💬 الدعم ({supportChats.length})</h2>
+              {supportChats.length === 0 && <p className="muted">لسه مفيش أي محادثات دعم.</p>}
+              {supportChats.map((c) => {
+                const unread =
+                  !!c.lastCustomerAt && (!c.lastReplyAt || c.lastCustomerAt > c.lastReplyAt)
+                const last = c.messages[c.messages.length - 1]
+                const lastTs = c.lastCustomerAt ? Date.parse(c.lastCustomerAt) : NaN
+                return (
+                  <div
+                    key={c.phone}
+                    className="ride"
+                    style={{
+                      cursor: 'pointer',
+                      background: unread ? '#fff7ed' : undefined,
+                      borderColor: unread ? '#f5c6b8' : undefined,
+                    }}
+                    onClick={() => setOpenSupportPhone(c.phone)}
+                  >
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <b>{c.name || 'عميل'}</b>
+                      {unread && <span className="tab-badge">جديد</span>}
+                    </div>
+                    <div className="muted">{c.phone}</div>
+                    {last && (
+                      <div className="muted" style={{ marginTop: 4 }}>
+                        {last.sender === 'customer'
+                          ? 'العميل: '
+                          : last.sender === 'agent'
+                            ? 'الدعم: '
+                            : 'الإدارة: '}
+                        {last.text.length > 60 ? `${last.text.slice(0, 60)}…` : last.text}
+                      </div>
+                    )}
+                    {!Number.isNaN(lastTs) && (
+                      <div className="muted" style={{ fontSize: 12 }}>
+                        آخر رسالة عميل: {fmtDateTime(lastTs)}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </>
       )}
     </>

@@ -156,6 +156,31 @@ export interface Washer {
   createdAt: number
 }
 
+/** شات الدعم (v30) — محادثة واحدة لكل رقم عميل، المستند supportChats/{phone}.
+ *  الردود بتيجي من المساعد (sender='agent') أو من الأدمن (sender='admin')؛
+ *  needsAdmin=true يعني الرسالة محتاجة قرار صلاح شخصياً. */
+export type SupportSender = 'customer' | 'agent' | 'admin'
+
+export interface SupportMessage {
+  sender: SupportSender
+  text: string
+  /** ISO string */
+  createdAt: string
+}
+
+export interface SupportChat {
+  phone: string
+  app: string
+  role: 'customer'
+  name: string
+  messages: SupportMessage[]
+  /** آخر رسالة من العميل — null لو لسه مبعتش */
+  lastCustomerAt: string | null
+  /** آخر رد (مساعد أو أدمن) — null لو لسه مفيش رد */
+  lastReplyAt: string | null
+  needsAdmin: boolean
+}
+
 /** مرحلة غسيل داخل كومباوند — مجموعة أيام أسبوع ثابتة. */
 export interface Phase {
   id: string

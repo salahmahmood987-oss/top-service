@@ -25,6 +25,7 @@
 //    settings/counters      — paymentSeq (لأرقام الإيصالات)
 // ---------------------------------------------------------------------------
 import {
+  arrayUnion,
   collection,
   deleteDoc as deleteFirestoreDoc,
   doc,
@@ -50,6 +51,9 @@ import type {
   Payment,
   Phase,
   Subscription,
+  SupportChat,
+  SupportMessage,
+  SupportSender,
   Washer,
   WashRequest,
 } from './types'
@@ -424,6 +428,86 @@ export async function loadWasherDoneWashes(phone: string): Promise<WashRequest[]
     .map((r) => normalizeWash(r.id, r))
     .filter((w) => w.status === 'done')
     .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
+}
+
+// ---------------------------------------------------------------------------
+//  شات الدعم (v30) — محادثة واحدة لكل رقم عميل: supportChats/{phone}
+// ---------------------------------------------------------------------------
+
+/** تطبيع مستند شات دعم — رسايل غير صالحة بتتخطى، والحسابات الزمنية
+ *  الفارغة بتبقى null. */
+export function normalizeSupportChat(id: string, d: Record<string, unknown>): SupportChat {
+  const p = d as unknown as Partial<SupportChat>
+  const rawMsgs = Array.isArray(p.messages) ? p.messages : []
+  const messages: SupportMessage[] = []
+  for (const m of rawMsgs) {
+    const msg = m as Partial<SupportMessage> | null
+    if (!msg || typeof msg !== 'object') continue
+    if (typeof msg.text !== 'string' || msg.text.trim() === '') continue
+    const sender: SupportSender =
+      msg.sender === 'agent' || msg.sender === 'admin' ? msg.sender : 'customer'
+    messages.push({
+      sender,
+      text: msg.text,
+      createdAt: typeof msg.createdAt === 'string' ? msg.createdAt : new Date().toISOString(),
+    })
+  }
+  return {
+    phone: p.phone ?? id,
+    app: typeof p.app === 'string' ? p.app : 'top-service',
+    role: 'customer',
+    name: typeof p.name === 'string' ? p.name : '',
+    messages,
+    lastCustomerAt: typeof p.lastCustomerAt === 'string' ? p.lastCustomerAt : null,
+    lastReplyAt: typeof p.lastReplyAt === 'string' ? p.lastReplyAt : null,
+    needsAdmin: p.needsAdmin === true,
+  }
+}
+
+/** شات دعم عميل واحد — null لو لسه مبعتش ولا رسالة. */
+export async function loadSupportChat(phone: string): Promise<SupportChat | null> {
+  const d = await loadDoc('supportChats', phone)
+  return d ? normalizeSupportChat(phone, d) : null
+}
+
+/** كل محادثات الدعم (للأدمن) — الأحدث رسالة من عميل أولاً، واللي من غير
+ *  رسايل عميل في الآخر. */
+export async function loadAllSupportChats(): Promise<SupportChat[]> {
+  const rows = await loadCollection('supportChats')
+  const ts = (c: SupportChat) => (c.lastCustomerAt ? Date.parse(c.lastCustomerAt) : 0)
+  return rows.map((r) => normalizeSupportChat(r.id, r)).sort((a, b) => ts(b) - ts(a))
+}
+
+/**
+ * إرسال رسالة دعم — بتتضاف للمصفوفة بـ arrayUnion في كتابة واحدة
+ * (setDoc بدمج بينشئ المستند لو مش موجود)، وبتحدّث وقت آخر رسالة
+ * حسب المرسل: عميل → lastCustomerAt، مساعد/أدمن → lastReplyAt.
+ */
+export async function sendSupportMessage(
+  phone: string,
+  sender: SupportSender,
+  text: string,
+  name?: string,
+): Promise<boolean> {
+  const db = getDb()
+  if (!db) return false
+  try {
+    const now = new Date().toISOString()
+    const data: Record<string, unknown> = {
+      app: 'top-service',
+      phone,
+      role: 'customer',
+      messages: arrayUnion({ sender, text, createdAt: now }),
+    }
+    if (name) data.name = name
+    if (sender === 'customer') data.lastCustomerAt = now
+    else data.lastReplyAt = now
+    await setDoc(doc(db, 'supportChats', phone), data, { merge: true })
+    return true
+  } catch (e) {
+    reportError('إرسال رسالة الدعم', e)
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
