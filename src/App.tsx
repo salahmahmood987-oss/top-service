@@ -883,6 +883,8 @@ function CustomerView({
   /** السحب التلقائي (v23): الكارت المحفوظ للعميل — null يعني مش مفعّل */
   const [autoPay, setAutoPay] = useState<{ maskedCard: string } | null>(null)
   const [autoPayBusy, setAutoPayBusy] = useState(false)
+  /** زرار إيقاف/تفعيل التجديد التلقائي لعربية (v28) — id الاشتراك الجاري حفظه */
+  const [autoRenewBusy, setAutoRenewBusy] = useState<string | null>(null)
   /** جلسة دفع مفتوحة في المتصفح — بنتحقق منها لما التبويب يتقفل.
    *  method = الزرار اللي داس عليه العميل (فيزا/محفظة)؛ لو فيزا، بعد
    *  نجاح الدفع بنجيب الكارت المحفوظ ونفعّل السحب التلقائي. */
@@ -1294,6 +1296,10 @@ function CustomerView({
     // الشهر الأول بيتحسب من يوم الاشتراك (مثال: باقة 200 يوم 15 → 100)،
     // وسعر الباقة نفسه في الاشتراك مبيتغيرش — اللي بيتغيّر مبلغ الدفعة بس.
     const dueAmount = proratedFirstMonthAmount(pkg.price, now)
+    // الاشتراك في آخر يوم في الشهر بيطلع مستحق 0 (يوم واحد بس فاضل) —
+    // مفيش دفعة مستحقة أصلاً، ومش مجاني: الاشتراك هيتجدد تلقائي الشهر
+    // الجديد بسعر الباقة الكامل (v28 — قرار صلاح).
+    const isStubMonth = dueAmount === 0
     // أيام الغسيل اللي اختارها العميل (v18) — بتتحفظ بس لو المعالج كان
     // فيه اختيار؛ غير كده null والأيام بتتشتق لوحدها. الاشتراكات القديمة
     // من غير الحقل ده بتاخد الافتراضي (أول يوم / أول وآخر يوم).
@@ -1321,22 +1327,27 @@ function CustomerView({
       approvedAt: now,
       // الاشتراك الجديد بيظهر في قايمة "اشتراكات جديدة" عند الأدمن (v25)
       adminSeen: false,
+      // التجديد التلقائي مفعّل افتراضياً (v28) — العميل يقدر يوقفه من صفحة العربية
+      autoRenew: true,
     })
-    const okPay = okSub
-      ? await saveDoc('payments', payId, {
-          id: payId,
-          subscriptionId: subId,
-          customerPhone: session.phone,
-          customerName: session.name,
-          carPlate: car.plate,
-          amount: dueAmount,
-          method: subMethod,
-          status: 'due',
-          receiptNo: null,
-          createdAt: now,
-          decidedAt: null,
-        })
-      : false
+    // المستحق 0 (اشتراك آخر يوم) → مفيش دفعة مستحقة أصلاً (v28).
+    const okPay = !okSub
+      ? false
+      : isStubMonth
+        ? true
+        : await saveDoc('payments', payId, {
+            id: payId,
+            subscriptionId: subId,
+            customerPhone: session.phone,
+            customerName: session.name,
+            carPlate: car.plate,
+            amount: dueAmount,
+            method: subMethod,
+            status: 'due',
+            receiptNo: null,
+            createdAt: now,
+            decidedAt: null,
+          })
     setBusy(false)
     if (!okSub || !okPay) {
       onNotice('مقدرناش نسجّل الاشتراك — تأكد إن النت شغال وحاول تاني.')
@@ -1345,7 +1356,28 @@ function CustomerView({
     closeWizard()
     await loadAll()
     onNotice(
-      `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${dueAmount} جنيه${startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}، والتحصيل من يوم 25 لآخر الشهر + 5 أيام سماح.`,
+      isStubMonth
+        ? `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. الشهر ده من غير مستحق (اشتركت آخر يوم)، والاشتراك هيتجدد تلقائي الشهر الجديد بـ ${pkg.price} جنيه.`
+        : `تم تفعيل اشتراك باقة ${pkg.washes} غسلات (${pkg.price} جنيه) للعربية ${car.plate} ✅ — الغسيل هيتم في أيام مرحلة عربيتك. المستحق ${dueAmount} جنيه${startDay > 1 ? ` (حساب الشهر الأول من يوم ${startDay})` : ''}، والتحصيل من يوم 25 لآخر الشهر + 5 أيام سماح. الاشتراك بيتجدد تلقائي كل شهر بنفس الباقة، وتقدر توقفه من صفحة العربية.`,
+    )
+  }
+
+  /** إيقاف / تفعيل التجديد التلقائي لاشتراك عربية (v28). */
+  async function toggleAutoRenew(sub: Subscription) {
+    if (autoRenewBusy) return
+    const next = sub.autoRenew === false ? true : false
+    setAutoRenewBusy(sub.id)
+    const ok = await saveDoc('subscriptions', sub.id, { autoRenew: next })
+    setAutoRenewBusy(null)
+    if (!ok) {
+      onNotice(getLastFirestoreError() ?? 'مقدرناش نحفظ — حاول تاني.')
+      return
+    }
+    await loadAll()
+    onNotice(
+      next
+        ? 'التجديد التلقائي اتفعّل ✅ — الاشتراك هيتجدد لوحده أول كل شهر.'
+        : 'التجديد التلقائي اتوقف — الاشتراك مش هيتجدد لوحده، جدّد بنفسك من تبويب "باقاتي" بعد ما ينتهي.',
     )
   }
 
@@ -1513,6 +1545,18 @@ function CustomerView({
                         تم التحصيل ✅ — إيصال رقم {paidPay.receiptNo}
                       </div>
                     )}
+                    <button
+                      className="btn"
+                      style={{ marginTop: 8 }}
+                      disabled={autoRenewBusy === active.id}
+                      onClick={() => void toggleAutoRenew(active)}
+                    >
+                      {autoRenewBusy === active.id
+                        ? 'بيحفظ…'
+                        : active.autoRenew === false
+                          ? '🔄 تفعيل التجديد التلقائي'
+                          : '⏸️ إيقاف التجديد التلقائي'}
+                    </button>
                     {active && phase && (
                       <WashCalendar
                         car={car}
@@ -3311,7 +3355,8 @@ function AdminView({
                     </div>
                     <div className="muted">
                       باقة {s.washesTotal} غسلات — {s.price} جنيه
-                      {duePay ? ` — المستحق ${duePay.amount} جنيه` : ''} — {fmtDate(s.createdAt)}
+                      {duePay ? ` — المستحق ${duePay.amount} جنيه` : ''}{' '}
+                      — {fmtDate(s.createdAt)}
                     </div>
                     <div className="muted">
                       {compoundWashers.length > 0
