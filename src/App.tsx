@@ -333,7 +333,13 @@ export default function App() {
   }, [])
 
   // فحص التحديثات عند الفتح: لو فيه إصدار أحدث على الريبو يظهر تنبيه جوّه التطبيق
+  // عدّاد فتحات التطبيق (v31) — "بعدين" بتأجّل التنبيه 4 فتحات بس، وبعدها يظهر تاني
+  const launchCountRef = useRef(0)
   useEffect(() => {
+    const launchCount =
+      (Number(localStorage.getItem('topservice-launch-count') ?? '0') || 0) + 1
+    localStorage.setItem('topservice-launch-count', String(launchCount))
+    launchCountRef.current = launchCount
     let cancelled = false
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 6000)
@@ -343,7 +349,20 @@ export default function App() {
         clearTimeout(timer)
         if (cancelled || !data || typeof data.version !== 'number') return
         if (data.version <= APP_VERSION) return
-        if (localStorage.getItem('topservice-update-dismissed') === String(data.version)) return
+        // "بعدين" بتسجّل الإصدار + عدّاد الفتحات وقت الرفض ("version:launchCount")؛
+        // التنبيه يتخطّى بس لو لسه ما عدّاش 4 فتحات من الرفض. قيمة قديمة من غير
+        // عدّاد (قبل v31) نعتبر سنوزها منتهي ويظهر التنبيه تاني.
+        const dismissedRaw = localStorage.getItem('topservice-update-dismissed')
+        if (dismissedRaw) {
+          const [dismissedVersion, dismissedAt] = dismissedRaw.split(':')
+          if (
+            Number(dismissedVersion) === data.version &&
+            dismissedAt !== undefined &&
+            dismissedAt !== '' &&
+            launchCount - Number(dismissedAt) < 4
+          )
+            return
+        }
         setAvailableUpdate({ version: data.version, apkUrl: typeof data.apkUrl === 'string' ? data.apkUrl : '' })
       })
       .catch(() => {
@@ -601,7 +620,11 @@ export default function App() {
   }
   // مودال التحديث — بيظهر لما يكون فيه إصدار أحدث (قابل للتجاهل، مش إجباري)
   const dismissUpdate = () => {
-    if (availableUpdate) localStorage.setItem('topservice-update-dismissed', String(availableUpdate.version))
+    if (availableUpdate)
+      localStorage.setItem(
+        'topservice-update-dismissed',
+        `${availableUpdate.version}:${launchCountRef.current}`,
+      )
     setAvailableUpdate(null)
   }
   const updateModal = availableUpdate ? (
@@ -609,6 +632,7 @@ export default function App() {
       <div className="notice-modal" onClick={(e) => e.stopPropagation()}>
         <div className="notice-icon">⬆</div>
         <p>في إصدار جديد من Top Service (v{availableUpdate.version}) — حدّث التطبيق عشان تشوف آخر المميزات والتحسينات.</p>
+        <p className="muted">لو دوست «بعدين» التنبيه هيظهر تاني بعد 4 فتحات.</p>
         {updateError && <p className="muted">{updateError}</p>}
         <div className="row">
           <button className="btn" disabled={updateBusy} onClick={() => void installUpdate(availableUpdate.apkUrl)}>{updateBusy ? (updateProgress > 0 ? `بيحمّل التحديث… ${updateProgress}%` : 'بيحمّل التحديث…') : 'حدّث دلوقتي ⬇'}</button>
